@@ -1,0 +1,4 @@
+cd "C:\Kopano App\frontend"
+npx vite
+cd "C:\Kopano App\backend"
+node src/index.js

@@ -1,81 +1,130 @@
+'use strict';
+
 const express = require('express');
-const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'kopano-dev-secret-change-in-production';
+const { authenticate } = require('../middleware/auth');
+const { money } = require('../lib/money');
 
-function authMiddleware(req, res, next) {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
-  }
-}
+const MAX_QTY_PER_ORDER = parseInt(process.env.MAX_ORDER_QTY || '100', 10);
+const PLATFORM_FEE_BPS = parseInt(process.env.PLATFORM_FEE_BPS || '300', 10);
 
-// Create order
-router.post('/', authMiddleware, async (req, res) => {
-  const { groupId, quantity, paymentMethod } = req.body;
+router.post('/', authenticate, async (req, res) => {
   const db = req.app.locals.db;
-  
+  const userId = req.user.userId;
+  const { groupId, paymentMethod } = req.body;
+  const quantity = parseInt(req.body.quantity, 10);
+
+  if (!groupId) return res.status(400).json({ error: 'groupId required', code: 'VALIDATION' });
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return res.status(400).json({ error: 'quantity must be a positive integer', code: 'INVALID_QUANTITY' });
+  }
+  if (quantity > MAX_QTY_PER_ORDER) {
+    return res.status(400).json({ error: `quantity exceeds maximum (${MAX_QTY_PER_ORDER})`, code: 'QTY_LIMIT' });
+  }
+  const allowedMethods = ['orange_money', 'mascom_wallet', 'card', 'dpo'];
+  if (!paymentMethod || !allowedMethods.includes(paymentMethod)) {
+    return res.status(400).json({ error: 'Invalid payment method', code: 'INVALID_PAYMENT_METHOD' });
+  }
+
+  const client = await db.getClient();
   try {
-    await db.query('BEGIN');
-    
-    // Lock group row
-    const group = await db.query(
-      'SELECT * FROM buying_groups WHERE id = $1 FOR UPDATE',
-      [groupId]
-    );
-    
-    if (group.rows.length === 0) {
-      await db.query('ROLLBACK');
-      return res.status(404).json({ error: 'Group not found' });
+    await client.query('BEGIN');
+    const groupRes = await client.query(`SELECT * FROM buying_groups WHERE id = $1 FOR UPDATE`, [groupId]);
+    if (!groupRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Group not found', code: 'NOT_FOUND' });
     }
-    
-    const g = group.rows[0];
-    if (g.status === 'cancelled') {
-      await db.query('ROLLBACK');
-      return res.status(400).json({ error: 'Group has been cancelled' });
+    const g = groupRes.rows[0];
+    if (g.status !== 'open') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Group is not open for orders', code: 'GROUP_CLOSED' });
     }
-    
-    const unitPrice = parseFloat(g.unit_price);
-    const totalAmount = unitPrice * quantity;
-    const platformFee = totalAmount * 0.03; // 3% transaction fee
-    const deliveryFee = parseFloat(g.delivery_fee || 15);
-    const grandTotal = totalAmount + platformFee + deliveryFee;
-    
-    const orderNum = 'KPN-' + Date.now().toString().slice(-5);
-    
-    const order = await db.query(
-      `INSERT INTO orders (order_number, user_id, group_id, quantity, unit_price, total_amount, delivery_fee, platform_fee, payment_method, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending_payment')
+    if (g.deadline && new Date(g.deadline) < new Date()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Group deadline has passed', code: 'GROUP_EXPIRED' });
+    }
+    const remaining = g.target_quantity - g.current_quantity;
+    if (quantity > remaining) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Insufficient capacity',
+        code: 'OVER_CAPACITY',
+        remaining: Math.max(0, remaining),
+      });
+    }
+
+    const unitPrice = money(g.unit_price);
+    const subtotal = money(unitPrice * quantity);
+    const platformFee = money((subtotal * PLATFORM_FEE_BPS) / 10000);
+    const deliveryFee = money(g.delivery_fee || 15);
+    const grandTotal = money(subtotal + platformFee + deliveryFee);
+    const orderNum = 'KPN-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+
+    const orderRes = await client.query(
+      `INSERT INTO orders (
+         order_number, user_id, group_id, quantity, unit_price,
+         total_amount, delivery_fee, platform_fee, payment_method, status
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending_payment')
        RETURNING *`,
-      [orderNum, req.user.userId, groupId, quantity, unitPrice, grandTotal, deliveryFee, platformFee, paymentMethod]
+      [orderNum, userId, groupId, quantity, unitPrice, grandTotal, deliveryFee, platformFee, paymentMethod]
     );
-    
-    await db.query('COMMIT');
-    res.status(201).json(order.rows[0]);
+
+    await client.query(
+      `UPDATE buying_groups
+       SET current_quantity = current_quantity + $1,
+           status = CASE WHEN current_quantity + $1 >= target_quantity THEN 'filled' ELSE status END,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [quantity, groupId]
+    );
+
+    await client.query('COMMIT');
+    const order = orderRes.rows[0];
+    res.status(201).json({
+      ...order,
+      breakdown: { unitPrice, quantity, subtotal, platformFee, deliveryFee, grandTotal, currency: 'BWP' },
+    });
   } catch (err) {
-    await db.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('order create error', err.message);
+    res.status(500).json({ error: 'Order creation failed', code: 'SERVER_ERROR' });
+  } finally {
+    client.release();
   }
 });
 
-// Get my orders
-router.get('/my', authMiddleware, async (req, res) => {
+router.get('/my', authenticate, async (req, res) => {
   const db = req.app.locals.db;
   try {
-    const result = await db.query(`
-      SELECT o.*, g.product_name, g.category, g.unit
-      FROM orders o
-      JOIN buying_groups g ON o.group_id = g.id
-      WHERE o.user_id = $1
-      ORDER BY o.created_at DESC
-    `, [req.user.userId]);
+    const result = await db.query(
+      `SELECT o.*, g.product_name, g.category, g.unit, g.retail_price, g.pickup_location
+       FROM orders o JOIN buying_groups g ON o.group_id = g.id
+       WHERE o.user_id = $1 ORDER BY o.created_at DESC`,
+      [req.user.userId]
+    );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to load orders', code: 'SERVER_ERROR' });
+  }
+});
+
+router.get('/:id', authenticate, async (req, res) => {
+  const db = req.app.locals.db;
+  try {
+    const result = await db.query(
+      `SELECT o.*, g.product_name, g.category, g.unit, g.retail_price, g.pickup_location
+       FROM orders o JOIN buying_groups g ON o.group_id = g.id WHERE o.id = $1`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Order not found', code: 'NOT_FOUND' });
+    const order = result.rows[0];
+    if (order.user_id !== req.user.userId && req.user.role !== 'admin') {
+      return res.status(404).json({ error: 'Order not found', code: 'NOT_FOUND' });
+    }
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load order', code: 'SERVER_ERROR' });
   }
 });
 

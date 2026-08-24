@@ -1,3 +1,18 @@
-﻿@tailwind base;
+@tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer components {
+  .btn-primary {
+    @apply w-full bg-gray-900 text-white py-3 rounded-xl font-medium disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply w-full bg-white border border-gray-200 text-gray-900 py-3 rounded-xl font-medium;
+  }
+  .input-field {
+    @apply w-full border border-gray-200 rounded-xl px-3 py-3 text-sm;
+  }
+  .card {
+    @apply bg-white border border-gray-200 rounded-xl p-4;
+  }
+}

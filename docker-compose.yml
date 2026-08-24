@@ -1,86 +1,73 @@
-import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { api } from '../api/client';
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-kopano}
+      POSTGRES_USER: ${DB_USER:-kopano}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-kopano123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./init.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-kopano} -d ${DB_NAME:-kopano}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Dev-only publish. Production compose does not publish 5432.
+    ports:
+      - "${DB_PORT:-5432}:5432"
 
-export default function Checkout() {
-  const location = useLocation();
-  const navigate = useNavigate();
-  const group = location.state?.group;
-  const [qty, setQty] = useState(2);
-  const [method, setMethod] = useState('orange_money');
-  const [paying, setPaying] = useState(false);
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      DATABASE_URL: postgres://${DB_USER:-kopano}:${DB_PASSWORD:-kopano123}@postgres:5432/${DB_NAME:-kopano}
+      JWT_SECRET: ${JWT_SECRET:-kopano-dev-only-secret-do-not-use-in-prod-32c}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-1h}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:3000}
+      PAYMENT_SANDBOX_AUTO_COMPLETE: ${PAYMENT_SANDBOX_AUTO_COMPLETE:-false}
+      OM_MERCHANT_ID: ${OM_MERCHANT_ID:-}
+      OM_MERCHANT_KEY: ${OM_MERCHANT_KEY:-}
+      OM_CLIENT_ID: ${OM_CLIENT_ID:-}
+      OM_CLIENT_SECRET: ${OM_CLIENT_SECRET:-}
+      OM_WEBHOOK_SECRET: ${OM_WEBHOOK_SECRET:-}
+      OM_ENV: ${OM_ENV:-sandbox}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  if (!group) return <div className="p-4">No group selected</div>;
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      - api
+    profiles: ["dev"]
 
-  const total = qty * group.unit_price;
-  const savings = qty * (group.retail_price - group.unit_price);
-
-  async function handlePay() {
-    setPaying(true);
-    try {
-      const order = await api.orders.create({
-        groupId: group.id,
-        quantity: qty,
-        paymentMethod: method,
-      });
-      
-      if (method === 'orange_money') {
-        await api.payments.orangeMoney(order.id, '+26771234567');
-      }
-      
-      navigate('/success', { state: { total, orderId: order.id } });
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setPaying(false);
-    }
-  }
-
-  return (
-    <div className="pb-24">
-      <h2 className="text-xl font-medium mb-5">Place order</h2>
-      
-      <div className="bg-white border rounded-xl p-4 mb-4">
-        <div className="flex justify-between mb-2">
-          <span className="text-gray-500">{group.product_name}</span>
-          <span className="font-medium">P{group.unit_price}/unit</span>
-        </div>
-        <div className="flex items-center gap-3 my-3">
-          <button onClick={() => setQty(Math.max(1, qty - 1))} className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center border">−</button>
-          <span className="text-lg font-medium w-10 text-center">{qty}</span>
-          <button onClick={() => setQty(qty + 1)} className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center border">+</button>
-        </div>
-        <div className="flex justify-between pt-3 border-t">
-          <span className="text-gray-500">You save vs retail</span>
-          <span className="text-green-600 font-medium">P{savings}</span>
-        </div>
-      </div>
-
-      <div className="text-sm font-medium mb-2.5">Payment method</div>
-      <div className="flex flex-col gap-2 mb-5">
-        {['orange_money', 'mascom_wallet', 'card'].map(m => (
-          <label key={m} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer ${
-            method === m ? 'border-gray-900 bg-gray-50' : 'border-gray-200'
-          }`}>
-            <input type="radio" name="pay" checked={method === m} onChange={() => setMethod(m)} className="accent-gray-900" />
-            <span className="font-medium capitalize">{m.replace('_', ' ')}</span>
-          </label>
-        ))}
-      </div>
-
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t">
-        <div className="flex justify-between mb-3">
-          <span className="text-gray-500">Total to pay</span>
-          <span className="text-xl font-medium">P{total}</span>
-        </div>
-        <button 
-          onClick={handlePay} 
-          disabled={paying}
-          className="w-full bg-gray-900 text-white py-3 rounded-xl font-medium disabled:opacity-50"
-        >
-          {paying ? 'Processing...' : 'Pay now'}
-        </button>
-      </div>
-    </div>
-  );
-}
+volumes:
+  postgres_data:
+  frontend_node_modules:

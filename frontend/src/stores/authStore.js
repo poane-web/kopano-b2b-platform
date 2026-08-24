@@ -1,12 +1,12 @@
-﻿import { create } from 'zustand';
+import { create } from 'zustand';
 import { api } from '../api/client';
 
-export const useAuthStore = create((set, get) => ({
+export const useAuthStore = create((set) => ({
   user: null,
   token: localStorage.getItem('kopano_token'),
   isLoading: true,
   isAuthenticated: false,
-  
+
   init: async () => {
     const token = localStorage.getItem('kopano_token');
     if (!token) {
@@ -18,29 +18,33 @@ export const useAuthStore = create((set, get) => ({
       set({ user, isAuthenticated: true, isLoading: false });
     } catch {
       localStorage.removeItem('kopano_token');
+      localStorage.removeItem('kopano_refresh');
       set({ user: null, token: null, isAuthenticated: false, isLoading: false });
     }
   },
-  
+
   login: async (phone, pin) => {
     const res = await api.auth.login(phone, pin);
     localStorage.setItem('kopano_token', res.token);
+    if (res.refreshToken) localStorage.setItem('kopano_refresh', res.refreshToken);
     set({ user: res.user, token: res.token, isAuthenticated: true });
     return res;
   },
-  
+
   register: async (data) => {
     const res = await api.auth.register(data);
     localStorage.setItem('kopano_token', res.token);
+    if (res.refreshToken) localStorage.setItem('kopano_refresh', res.refreshToken);
     set({ user: res.user, token: res.token, isAuthenticated: true });
     return res;
   },
-  
+
   logout: () => {
     localStorage.removeItem('kopano_token');
+    localStorage.removeItem('kopano_refresh');
     set({ user: null, token: null, isAuthenticated: false });
     window.location.href = '/';
   },
-  
+
   setUser: (user) => set({ user }),
 }));

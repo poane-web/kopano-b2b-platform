@@ -1,0 +1,15 @@
+-- Kept for existing databases created from the original init.sql
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) DEFAULT 'customer';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS account_status VARCHAR(20) DEFAULT 'active';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INT DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS supplier_id UUID;
+
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255);
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS provider VARCHAR(50);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS provider_payload JSONB DEFAULT '{}';
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();

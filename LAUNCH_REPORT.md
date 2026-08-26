@@ -1,6 +1,6 @@
 # Kopano launch report
 
-**Date:** 2026-08-24  
+**Date:** 2026-08-26  
 **Classification:** READY FOR CONTROLLED PILOT  
 **Not:** READY FOR PRODUCTION (live money)
 
@@ -16,87 +16,84 @@
 | 6 Frontend/API alignment, token lifecycle, payment UX | Complete |
 | 7 PWA stale financial cache | Complete (API network-only) |
 | 8 Production Docker / env | Complete (compose files; Docker engine not in this sandbox) |
-| 9 Integration tests | Complete — 38 passed |
+| 9 Integration tests | Complete on PGlite — 55 passed; real PostgreSQL suite present, skipped here |
 | 10 Security review | Complete |
+| 11 Reservation / payment lifecycle (P1) | Complete |
 
 ## 2. Important files
 
-- `backend/src/app.js` — route mount, security middleware
-- `backend/src/middleware/auth.js` — JWT + RBAC
-- `backend/src/routes/{auth,orders,payments,admin,supplier,agents,referrals,groups}.js`
-- `backend/src/schema.sql`
-- `backend/test/*.test.js`
-- `frontend/src/api/client.js`, `stores/authStore.js`, `pages/Checkout.jsx`, `public/sw.js`
-- `docker-compose.yml`, `docker-compose.prod.yml`, `.env.example`
+- `backend/src/services/reservations.js` — reserved / confirmed / released capacity
+- `backend/src/routes/{orders,payments,groups}.js`
+- `backend/src/lib/omWebhook.js` — raw-body parse + optional HMAC; notif_token auth
+- `backend/src/schema.sql`, `backend/src/migrations/002_reservations.sql`
+- `backend/test/reservations.integration.test.js`
+- `backend/test/webhook.integration.test.js`
+- `backend/test/postgres.integration.test.js` (requires `TEST_DATABASE_URL`)
+- `docker-compose.yml`, `docker-compose.prod.yml`, `docker-compose.dev.yml`
 
-## 3. Vulnerabilities (before → after)
+## 3. Vulnerabilities / logic bugs (before → after)
 
 | Issue | Before | After |
 |-------|--------|--------|
-| Routes not mounted / mock API | Demo endpoints only | Canonical `/api/*` modules mounted |
-| Admin `next()` | Open | 401 unauth / 403 non-admin |
-| Simulated payment success | Immediate `paid` | `awaiting_confirmation` until signed webhook |
-| Empty auth/db modules | 0-byte | Production pool + JWT |
-| Hard-coded payee phone | `+26771234567` | Profile MSISDN / none |
-| CSV split on comma | Naive | Quoted parser + validation + no persist by default |
-| SW cached `/api` | Stale money | Network-only, no API cache |
-| JWT dev fallback in prod | Yes | Fail-fast if secret missing/weak |
-| IDOR orders/suppliers | Unscoped | Owner/supplier_id scoped, 404 |
+| Unpaid order permanently consumed group quantity | `current_quantity` incremented at checkout; fail left it filled | `reserved_quantity` held until pay/fail/expire/cancel; fail/expire/cancel releases |
+| Webhook HMAC over `JSON.stringify(req.body)` | Could diverge from wire bytes | Raw request bytes captured; HMAC only if header/`OM_REQUIRE_HMAC` |
+| Orange callback auth guessed as HMAC | Incorrect vs WebPay spec | `notif_token` lookup + Transaction Status API when credentials exist |
+| Tracked `.env.txt` | Placeholder secrets in git | Removed from git; ignored |
 
-## 4. Tests (exact)
+## 4. Tests (exact, this environment)
 
 ```
-# tests 38
-# suites 4
-# pass 38
+cd backend && NODE_ENV=test npm test
+# tests 55
+# suites 7
+# pass 55
 # fail 0
 # skipped 0
 ```
 
-## 5. Integration results
+PostgreSQL suite `postgresql reservation lifecycle` is **skipped** when `TEST_DATABASE_URL` is unset (this sandbox: no Docker, no system Postgres, cannot drop root to run embedded Postgres).
+
+## 5. Reservation regression tests (PGlite)
 
 | Scenario | Result |
 |----------|--------|
-| Order concurrency (1 remaining, 2 buyers) | 1 × 201, 1 × 400/409, `current_quantity = 100` |
-| Duplicate payment (same idempotency key) | Single transaction |
-| Duplicate webhook | First `paid`, second `already_completed`, savings once |
-| Forged webhook (missing/invalid HMAC) | 401, order not paid |
-| Amount tampering | Client amount ignored; webhook amount mismatch 400 |
-| Admin unauth / customer / supplier / agent | 401 / 403 / 403 / 403; admin 200 |
-| Supplier isolation | Cross-tenant order 404 |
-| Agent isolation | Cannot access supplier APIs (403); unknown order 404 |
+| Successful payment preserves reservation and confirms | reserved→0, confirmed+=qty, current unchanged |
+| Failed payment releases | reserved 0, current restored, group re-opens |
+| Expired reservation releases | admin `/expire-stale` |
+| Cancelled order releases | `POST /api/orders/:id/cancel` |
+| Two customers, last units | 1 × 201, 1 × 409/400, no oversell |
+| Failed hold then another buyer | second 201 |
+| Duplicate SUCCESS webhook | paid then already_completed; quantities once |
+| Repeated payment attempts | same transaction, reserved qty once |
+| Group status available/reserved/confirmed | matches counters |
 
-## 6. Build
+## 6. Build / Docker / audit
 
-- Backend syntax + tests: pass
-- Frontend `vite build`: pass (113 modules)
-- Docker: engine not available in this environment; Dockerfiles and compose written. `docker compose config` not executed here.
+- Backend tests: pass (above)
+- Docker: engine not available; compose files updated. Runtime `docker compose config` **not executed**.
+- Production overlay: Postgres unpublished; frontend bind-mount reset; `JWT_SECRET` / `DB_PASSWORD` required via `:?`
+- Dev overlay: Postgres on `127.0.0.1` only
 
-## 7. Dependency scan
+## 7. Remaining external requirements
 
-`npm audit --omit=dev` (backend): **0 vulnerabilities**
-
-## 8. Remaining external requirements
-
-- Orange Money merchant ID, OAuth client, webhook HMAC secret, production API URL
+- Orange Money merchant + OAuth + public HTTPS `notif_url`
 - DPO token if cards are required
 - DNS, TLS, hosting
-- SMS (Africa's Talking) if OTP/notifications required
-- Object storage credentials if document KYC is required
-- Merchant / Bank of Botswana operational approval
+- SMS / object storage if those products are enabled
+- Run `TEST_DATABASE_URL=... npm run test:pg` on a real PostgreSQL 15 before the first sell-out group
 
-## 9. Known limitations
+## 8. Known limitations
 
-- Live provider HTTP calls are not executed (no merchant credentials). Adapter + HMAC + idempotency are tested with mocks/unsigned-fail-closed.
-- Concurrency tests run on PGlite with serialized transactions; SQL uses `FOR UPDATE` for real PostgreSQL.
-- Mas/Mascom wallet is accepted as a method label; only Orange Money has an adapter.
-- Refunds have ledger types but no full refund API yet.
-- PGlite in-memory mode is **dev-only** when `DATABASE_URL` is unset.
+- Live provider HTTP calls are not executed (no merchant credentials).
+- PGlite serializes `getClient()`; `FOR UPDATE` SQL is written for PostgreSQL but **not proven on PostgreSQL in this environment**.
+- Mascom wallet is a method label only.
+- Refunds have ledger types but no full refund API.
+- Orange WebPay does not HMAC-sign notifications; production authenticity is `notif_token` + Transaction Status API.
 
-## 10. Launch classification
+## 9. Launch classification
 
 **READY FOR CONTROLLED PILOT**
 
-Code is ready to register businesses, run groups, create orders, and record payments as pending until a **real signed provider webhook** arrives.
+Unpaid/failed orders no longer permanently consume group capacity. Payments still cannot become `paid` without a verified provider notification (`notif_token`, and Transaction Status when credentials exist).
 
-**Not READY FOR PRODUCTION** for live money until Orange Money (or DPO) credentials are issued, webhook URL is reachable over TLS, and a staging payment is confirmed end-to-end with the provider.
+**Not READY FOR PRODUCTION** for live money until Orange Money credentials are issued, `notif_url` is reachable over TLS, a staging payment is confirmed end-to-end, and the PostgreSQL concurrency suite has been run against the staging database.

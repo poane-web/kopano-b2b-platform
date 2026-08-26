@@ -3,20 +3,20 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 const paymentService = require('../services/payments');
+const reservations = require('../services/reservations');
 const { money } = require('../lib/money');
-
-function timingSafeEqual(a, b) {
-  const ba = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
-}
+const omWebhook = require('../lib/omWebhook');
 
 async function finalizeSuccessfulPayment(client, { orderId, transactionId, externalReference, userId, providerPayload }) {
   const txCheck = await client.query(`SELECT status FROM transactions WHERE id = $1 FOR UPDATE`, [transactionId]);
   if (txCheck.rows[0]?.status === 'completed') return { duplicate: true };
+
+  const confirmed = await reservations.confirmReservation(client, orderId);
+  if (!confirmed.confirmed) {
+    return { duplicate: false, paid: false, reason: confirmed.reason || 'NO_CAPACITY' };
+  }
 
   await client.query(
     `UPDATE transactions
@@ -33,7 +33,7 @@ async function finalizeSuccessfulPayment(client, { orderId, transactionId, exter
     [externalReference, orderId]
   );
 
-  if (orderRes.rows.length) {
+  if (orderRes.rows.length && !confirmed.duplicate) {
     const o = orderRes.rows[0];
     const group = await client.query(`SELECT retail_price, unit_price FROM buying_groups WHERE id = $1`, [o.group_id]);
     if (group.rows.length) {
@@ -44,7 +44,7 @@ async function finalizeSuccessfulPayment(client, { orderId, transactionId, exter
       );
     }
   }
-  return { duplicate: false };
+  return { duplicate: !!confirmed.duplicate, paid: true };
 }
 
 router.post('/orange-money', authenticate, async (req, res) => {
@@ -55,10 +55,16 @@ router.post('/orange-money', authenticate, async (req, res) => {
 
   if (!orderId) return res.status(400).json({ error: 'orderId required', code: 'VALIDATION' });
 
-  // Ignore any client-supplied amount — backend is source of truth
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
+    const peek = await client.query(`SELECT group_id FROM orders WHERE id = $1 AND user_id = $2`, [orderId, userId]);
+    if (!peek.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Order not found', code: 'NOT_FOUND' });
+    }
+    await reservations.expireStaleReservations(client, peek.rows[0].group_id);
+
     const orderRes = await client.query(`SELECT * FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE`, [orderId, userId]);
     if (!orderRes.rows.length) {
       await client.query('ROLLBACK');
@@ -74,6 +80,12 @@ router.post('/orange-money', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Order not payable in current state', code: 'INVALID_STATE' });
     }
 
+    const held = await reservations.ensureReservation(client, order);
+    if (!held.ok) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Insufficient capacity to re-reserve', code: 'OVER_CAPACITY' });
+    }
+
     if (idempotencyKey) {
       const existing = await client.query(
         `SELECT * FROM transactions WHERE user_id = $1 AND idempotency_key = $2 ORDER BY created_at DESC LIMIT 1`,
@@ -87,6 +99,7 @@ router.post('/orange-money', authenticate, async (req, res) => {
           status: t.status,
           transactionId: t.id,
           externalReference: t.external_reference,
+          notifToken: t.notif_token,
           orderId,
           message: 'Existing payment attempt returned (idempotent)',
         });
@@ -102,13 +115,33 @@ router.post('/orange-money', authenticate, async (req, res) => {
       return res.status(409).json({ error: 'Order already has a completed payment', code: 'ALREADY_PAID' });
     }
 
+    const openTx = await client.query(
+      `SELECT * FROM transactions
+       WHERE order_id = $1 AND type = 'payment' AND status IN ('initiated','awaiting_confirmation')
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId]
+    );
+    if (openTx.rows.length && !idempotencyKey) {
+      await client.query('COMMIT');
+      const t = openTx.rows[0];
+      return res.json({
+        success: true,
+        status: t.status,
+        transactionId: t.id,
+        externalReference: t.external_reference,
+        notifToken: t.notif_token,
+        orderId,
+        message: 'Existing payment attempt returned (no duplicate reservation)',
+      });
+    }
+
     const externalRef = 'OM-' + crypto.randomBytes(8).toString('hex').toUpperCase();
     const amount = money(order.total_amount);
 
     const txRes = await client.query(
       `INSERT INTO transactions (
-         order_id, user_id, amount, type, method, external_reference, status, idempotency_key, provider
-       ) VALUES ($1,$2,$3,'payment','orange_money',$4,'initiated',$5,'orange_money') RETURNING *`,
+         order_id, user_id, amount, type, method, external_reference, status, idempotency_key, provider, notif_token
+       ) VALUES ($1,$2,$3,'payment','orange_money',$4,'initiated',$5,'orange_money',$4) RETURNING *`,
       [orderId, userId, amount, externalRef, idempotencyKey]
     );
     const tx = txRes.rows[0];
@@ -137,9 +170,17 @@ router.post('/orange-money', authenticate, async (req, res) => {
       return res.status(502).json({ error: 'Payment provider unavailable', code: 'PROVIDER_ERROR', transactionId: tx.id });
     }
 
+    const notifToken = providerResult?.notif_token || externalRef;
+    const payToken = providerResult?.payment_token || null;
     await db.query(
-      `UPDATE transactions SET status = 'awaiting_confirmation', provider_payload = $1, updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify(providerResult || {}), tx.id]
+      `UPDATE transactions
+       SET status = 'awaiting_confirmation',
+           notif_token = $1,
+           pay_token = $2,
+           provider_payload = $3,
+           updated_at = NOW()
+       WHERE id = $4`,
+      [notifToken, payToken, JSON.stringify(providerResult || {}), tx.id]
     );
 
     const sandboxAutoPay = process.env.PAYMENT_SANDBOX_AUTO_COMPLETE === 'true' && process.env.NODE_ENV !== 'production';
@@ -177,6 +218,7 @@ router.post('/orange-money', authenticate, async (req, res) => {
       status: 'awaiting_confirmation',
       transactionId: tx.id,
       externalReference: externalRef,
+      notifToken,
       orderId,
       paymentUrl: providerResult?.payment_url || null,
       amount,
@@ -196,38 +238,55 @@ router.post('/webhook/orange-money', async (req, res) => {
   const db = req.app.locals.db;
   const webhookSecret = process.env.OM_WEBHOOK_SECRET;
   const isProd = process.env.NODE_ENV === 'production';
+  const requireHmac = process.env.OM_REQUIRE_HMAC === 'true';
+  const rawBody = req.rawBody;
+  const sigHeader = req.headers['x-om-signature'] || req.headers['x-callback-signature'] || '';
 
-  if (!webhookSecret) {
-    if (isProd) return res.status(401).json({ error: 'Webhook not configured' });
-    // fail-closed in tests unless TEST_ALLOW_UNSIGNED_WEBHOOK=true
-    if (process.env.TEST_ALLOW_UNSIGNED_WEBHOOK !== 'true') {
-      return res.status(401).json({ error: 'Invalid signature', code: 'WEBHOOK_SIG' });
-    }
-  } else {
-    const sig = req.headers['x-om-signature'] || req.headers['x-callback-signature'] || '';
-    const expected = crypto.createHmac('sha256', webhookSecret).update(JSON.stringify(req.body || {})).digest('hex');
-    if (!sig || !timingSafeEqual(sig, expected)) {
-      return res.status(401).json({ error: 'Invalid signature', code: 'WEBHOOK_SIG' });
-    }
+  let body;
+  try {
+    body = rawBody ? omWebhook.parseRawJson(rawBody) : (req.body || {});
+  } catch {
+    return res.status(400).json({ error: 'Invalid JSON', code: 'INVALID_JSON' });
   }
 
-  const body = req.body || {};
-  const externalRef = body.order_id || body.external_reference || body.txnid || body.reference || body.notif_token;
-  const providerStatus = String(body.status || body.payment_status || body.result || '').toLowerCase();
-  if (!externalRef) return res.status(400).json({ error: 'Missing reference', code: 'VALIDATION' });
+  // Optional HMAC is over RAW bytes only (never JSON.stringify of parsed body).
+  // Orange Money WebPay itself does not send HMAC; tests / reverse-proxies may.
+  if (requireHmac || sigHeader) {
+    if (!rawBody || !webhookSecret) {
+      return res.status(401).json({ error: 'Invalid signature', code: 'WEBHOOK_SIG' });
+    }
+    const verified = omWebhook.verifyRawHmac(rawBody, sigHeader, webhookSecret);
+    if (!verified.ok) return res.status(401).json({ error: 'Invalid signature', code: 'WEBHOOK_SIG' });
+  } else if (isProd && !webhookSecret && process.env.OM_ALLOW_UNSIGNED !== 'true') {
+    // Production unsigned path still authenticates via notif_token below.
+  }
+
+  const notifToken = omWebhook.extractNotifToken(body);
+  const externalRef = omWebhook.extractExternalRef(body);
+  if (!notifToken && !externalRef) {
+    return res.status(401).json({ error: 'Missing notif_token', code: 'WEBHOOK_AUTH' });
+  }
 
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
     const txRes = await client.query(
-      `SELECT * FROM transactions WHERE external_reference = $1 FOR UPDATE`,
-      [String(externalRef)]
+      `SELECT * FROM transactions
+       WHERE ($1::text IS NOT NULL AND notif_token = $1)
+          OR ($2::text IS NOT NULL AND external_reference = $2)
+       FOR UPDATE`,
+      [notifToken, externalRef]
     );
     if (!txRes.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(200).json({ received: true, matched: false });
+      return res.status(401).json({ error: 'Unknown notification token', code: 'WEBHOOK_AUTH' });
     }
     const tx = txRes.rows[0];
+
+    if (notifToken && tx.notif_token && notifToken !== tx.notif_token) {
+      await client.query('ROLLBACK');
+      return res.status(401).json({ error: 'notif_token mismatch', code: 'WEBHOOK_AUTH' });
+    }
 
     if (body.amount != null && money(body.amount) !== money(tx.amount)) {
       await client.query('ROLLBACK');
@@ -239,32 +298,44 @@ router.post('/webhook/orange-money', async (req, res) => {
       return res.status(200).json({ received: true, status: 'already_completed' });
     }
 
-    const successStatuses = ['success', 'successful', 'paid', 'completed', '0', '00'];
-    const failStatuses = ['failed', 'fail', 'cancelled', 'canceled', 'expired', 'rejected'];
+    const kind = omWebhook.classifyStatus(body);
 
-    if (successStatuses.includes(providerStatus) || body.success === true) {
+    if (kind === 'success') {
+      const confirmation = await paymentService.confirmOrangeMoneyStatus({
+        payToken: tx.pay_token,
+        orderId: tx.external_reference,
+        amount: tx.amount,
+      });
+      if (!confirmation.skipped && !confirmation.ok) {
+        await client.query('ROLLBACK');
+        return res.status(502).json({ error: 'Provider status not confirmed', code: 'PROVIDER_UNCONFIRMED' });
+      }
       const result = await finalizeSuccessfulPayment(client, {
         orderId: tx.order_id,
         transactionId: tx.id,
         externalReference: tx.external_reference,
         userId: tx.user_id,
-        providerPayload: body,
+        providerPayload: { ...body, txnid: body.txnid || null },
       });
+      if (!result.paid && !result.duplicate) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Capacity no longer available', code: result.reason || 'NO_CAPACITY' });
+      }
       await client.query('COMMIT');
       return res.status(200).json({ received: true, status: result.duplicate ? 'already_completed' : 'paid' });
     }
-    if (failStatuses.includes(providerStatus)) {
+
+    if (kind === 'failed' || kind === 'expired') {
       await client.query(
-        `UPDATE transactions SET status = 'failed', provider_payload = COALESCE(provider_payload, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(body), tx.id]
+        `UPDATE transactions SET status = $3, provider_payload = COALESCE(provider_payload, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(body), tx.id, kind === 'expired' ? 'expired' : 'failed']
       );
-      await client.query(
-        `UPDATE orders SET status = 'pending_payment', updated_at = NOW() WHERE id = $1 AND status = 'payment_initiated'`,
-        [tx.order_id]
-      );
+      const newOrderStatus = kind === 'expired' ? 'expired' : 'pending_payment';
+      await reservations.releaseReservation(client, tx.order_id, { newOrderStatus });
       await client.query('COMMIT');
-      return res.status(200).json({ received: true, status: 'failed' });
+      return res.status(200).json({ received: true, status: kind });
     }
+
     await client.query(
       `UPDATE transactions SET provider_payload = COALESCE(provider_payload, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify(body), tx.id]
@@ -280,11 +351,27 @@ router.post('/webhook/orange-money', async (req, res) => {
   }
 });
 
+router.post('/expire-stale', authenticate, requireAdmin, async (req, res) => {
+  const db = req.app.locals.db;
+  const client = await db.getClient();
+  try {
+    await client.query('BEGIN');
+    const result = await reservations.expireAllStaleReservations(client);
+    await client.query('COMMIT');
+    res.json(result);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    res.status(500).json({ error: 'Expire failed', code: 'SERVER_ERROR' });
+  } finally {
+    client.release();
+  }
+});
+
 router.get('/status/:transactionId', authenticate, async (req, res) => {
   const db = req.app.locals.db;
   try {
     const result = await db.query(
-      `SELECT id, order_id, user_id, amount, status, method, external_reference, created_at, updated_at
+      `SELECT id, order_id, user_id, amount, status, method, external_reference, notif_token, created_at, updated_at
        FROM transactions WHERE id = $1`,
       [req.params.transactionId]
     );

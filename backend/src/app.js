@@ -49,6 +49,26 @@ function createApp({ db, disableRateLimit = false } = {}) {
     })
   );
 
+  // Orange Money notif_url: HMAC (if present) is over RAW bytes, then JSON is parsed.
+  app.use(
+    '/api/payments/webhook',
+    express.raw({ type: () => true, limit: process.env.JSON_BODY_LIMIT || '100kb' }),
+    (req, res, next) => {
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      req.rawBody = buf;
+      const text = buf.toString('utf8').trim();
+      if (!text) {
+        req.body = {};
+        return next();
+      }
+      try {
+        req.body = JSON.parse(text);
+      } catch {
+        return res.status(400).json({ error: 'Invalid JSON', code: 'INVALID_JSON' });
+      }
+      next();
+    }
+  );
   app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '100kb' }));
   app.use(express.urlencoded({ extended: false, limit: '50kb' }));
 

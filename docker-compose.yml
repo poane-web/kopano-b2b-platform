@@ -15,9 +15,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Dev-only publish. Production compose does not publish 5432.
-    ports:
-      - "${DB_PORT:-5432}:5432"
+    # Not published on 0.0.0.0. Local tooling can use docker-compose.dev.yml.
 
   api:
     build:
@@ -38,11 +36,13 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:3000}
       PAYMENT_SANDBOX_AUTO_COMPLETE: ${PAYMENT_SANDBOX_AUTO_COMPLETE:-false}
+      PAYMENT_RESERVATION_TTL_MINUTES: ${PAYMENT_RESERVATION_TTL_MINUTES:-20}
       OM_MERCHANT_ID: ${OM_MERCHANT_ID:-}
       OM_MERCHANT_KEY: ${OM_MERCHANT_KEY:-}
       OM_CLIENT_ID: ${OM_CLIENT_ID:-}
       OM_CLIENT_SECRET: ${OM_CLIENT_SECRET:-}
       OM_WEBHOOK_SECRET: ${OM_WEBHOOK_SECRET:-}
+      OM_REQUIRE_HMAC: ${OM_REQUIRE_HMAC:-false}
       OM_ENV: ${OM_ENV:-sandbox}
     ports:
       - "${API_PORT:-3000}:3000"

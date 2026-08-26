@@ -83,4 +83,38 @@ async function initiateOrangeMoneyPayment({ amount, phone, orderId, externalRef,
   };
 }
 
-module.exports = { initiateOrangeMoneyPayment, isConfigured };
+/**
+ * Orange Money Transaction Status API. Confirms a SUCCESS notification
+ * before marking an order paid. Skipped only when merchant credentials
+ * are absent (tests / unconfigured sandbox).
+ */
+async function confirmOrangeMoneyStatus({ payToken, orderId, amount }) {
+  if (!isConfigured()) {
+    return { ok: false, skipped: true, reason: 'provider_not_configured' };
+  }
+  if (!payToken) {
+    return { ok: false, skipped: false, reason: 'missing_pay_token' };
+  }
+  const apiBase = process.env.OM_API_URL || (process.env.OM_ENV === 'production' ? ORANGE_PROD_URL : ORANGE_SANDBOX_URL);
+  const token = await getOrangeMoneyToken();
+  const res = await fetch(`${apiBase}/transactionstatus`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      order_id: String(orderId),
+      amount: Number(amount).toFixed(2),
+      pay_token: payToken,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, skipped: false, reason: data.message || `HTTP ${res.status}`, raw: data };
+  const status = String(data.status || data.payment_status || '').toLowerCase();
+  const ok = ['success', 'successful', 'paid', 'completed', '0', '00'].includes(status);
+  return { ok, skipped: false, status, raw: data };
+}
+
+module.exports = { initiateOrangeMoneyPayment, isConfigured, confirmOrangeMoneyStatus };

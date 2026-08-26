@@ -1,26 +1,31 @@
-# Production overlay — no bind mounts, no published Postgres, built frontend
+# Production overlay — no bind mounts, Postgres not published, built frontend
 services:
   postgres:
-    ports: []
     restart: always
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
 
   api:
     restart: always
     environment:
       NODE_ENV: production
-    read_only: false
+      PAYMENT_SANDBOX_AUTO_COMPLETE: "false"
+      OM_REQUIRE_HMAC: ${OM_REQUIRE_HMAC:-false}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      DATABASE_URL: postgres://${DB_USER:-kopano}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-kopano}
 
   frontend:
-    profiles: []
-    image: null
+    profiles: !reset []
+    image: !reset
+    volumes: !reset []
+    command: !reset []
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-/api}
     working_dir: /usr/share/nginx/html
-    volumes: []
-    command: []
     environment:
       API_UPSTREAM: http://api:3000
     ports:

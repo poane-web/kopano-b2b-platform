@@ -2,6 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
+const reservations = require('../services/reservations');
 
 router.get('/', async (req, res) => {
   const { category, status = 'open' } = req.query;
@@ -34,8 +35,11 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   const db = req.app.locals.db;
+  const client = await db.getClient();
   try {
-    const result = await db.query(
+    await client.query('BEGIN');
+    await reservations.expireStaleReservations(client, req.params.id);
+    const result = await client.query(
       `SELECT g.*, s.name AS supplier_name,
         CASE WHEN g.target_quantity > 0
           THEN ROUND((g.current_quantity::numeric / g.target_quantity) * 100, 1)
@@ -46,20 +50,27 @@ router.get('/:id', async (req, res) => {
        WHERE g.id = $1`,
       [req.params.id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Group not found', code: 'NOT_FOUND' });
-    const members = await db.query(
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Group not found', code: 'NOT_FOUND' });
+    }
+    const members = await client.query(
       `SELECT COUNT(DISTINCT user_id)::int AS count FROM orders
-       WHERE group_id = $1 AND status IN ('paid','group_filling','ordered','ready_pickup','payment_initiated','pending_payment')`,
+       WHERE group_id = $1 AND reservation_status IN ('reserved','confirmed')`,
       [req.params.id]
     );
+    await client.query('COMMIT');
     const group = result.rows[0];
     group.member_count = members.rows[0].count;
     group.is_expired = group.deadline ? new Date(group.deadline) < new Date() : false;
     group.is_open = group.status === 'open' && !group.is_expired;
     res.json(group);
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('group detail', err.message);
     res.status(500).json({ error: 'Failed to load group', code: 'SERVER_ERROR' });
+  } finally {
+    client.release();
   }
 });
 

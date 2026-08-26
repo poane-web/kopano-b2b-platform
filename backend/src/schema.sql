@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS buying_groups (
     retail_price DECIMAL(10,2) NOT NULL,
     target_quantity INT NOT NULL,
     current_quantity INT DEFAULT 0,
+    reserved_quantity INT NOT NULL DEFAULT 0,
+    confirmed_quantity INT NOT NULL DEFAULT 0,
     unit VARCHAR(50) NOT NULL,
     deadline TIMESTAMPTZ NOT NULL,
     status VARCHAR(20) DEFAULT 'open' CHECK (status IN ('draft','open','filled','ordering','ordered','fulfilling','delivered','completed','cancelled')),
@@ -71,6 +73,8 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_method VARCHAR(50),
     payment_reference VARCHAR(255),
     pickup_code VARCHAR(10),
+    reservation_status VARCHAR(20) DEFAULT 'none' CHECK (reservation_status IN ('none', 'reserved', 'confirmed', 'released')),
+    reserved_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -94,6 +98,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     external_reference VARCHAR(255),
     idempotency_key VARCHAR(64),
     provider VARCHAR(50),
+    notif_token VARCHAR(255),
+    pay_token VARCHAR(255),
     provider_payload JSONB DEFAULT '{}',
     status VARCHAR(30) DEFAULT 'pending' CHECK (status IN (
       'pending', 'initiated', 'awaiting_confirmation', 'completed', 'failed', 'reversed', 'cancelled', 'expired'
@@ -211,6 +217,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_idempotency
   ON transactions (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_external_ref
   ON transactions (external_reference) WHERE external_reference IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_notif_token
+  ON transactions (notif_token) WHERE notif_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_orders_reservation ON orders(group_id, reservation_status);
 CREATE INDEX IF NOT EXISTS idx_referral_codes_owner ON referral_codes(owner_id);
 CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);

@@ -229,8 +229,9 @@ describe('authorization, isolation, payments, concurrency', async () => {
       body: { orderId: order.json.id },
     });
     const body = {
-      external_reference: pay.json.externalReference,
-      status: 'success',
+      status: 'SUCCESS',
+      notif_token: pay.json.notifToken || pay.json.externalReference,
+      txnid: 'MP-DUP-SEC',
       amount: pay.json.amount,
     };
     const sig = signWebhook(body);
@@ -266,7 +267,12 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerB),
       body: { orderId: order.json.id },
     });
-    const body = { external_reference: pay.json.externalReference, status: 'success', amount: pay.json.amount };
+    const body = {
+      status: 'SUCCESS',
+      notif_token: pay.json.notifToken || pay.json.externalReference,
+      txnid: 'MP-FORGE',
+      amount: pay.json.amount,
+    };
     const missing = await request(base, 'POST', '/api/payments/webhook/orange-money', { body });
     assert.equal(missing.status, 401);
     const bad = await request(base, 'POST', '/api/payments/webhook/orange-money', {
@@ -288,7 +294,12 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
-    const body = { external_reference: pay.json.externalReference, status: 'success', amount: 1 };
+    const body = {
+      status: 'SUCCESS',
+      notif_token: pay.json.notifToken || pay.json.externalReference,
+      txnid: 'MP-AMT',
+      amount: 1,
+    };
     const sig = signWebhook(body);
     const w = await request(base, 'POST', '/api/payments/webhook/orange-money', {
       body,

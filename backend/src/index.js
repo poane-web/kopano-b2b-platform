@@ -41,6 +41,21 @@ async function resolveDb() {
   return wrapPglite(pglite);
 }
 
+async function applyMigrations(db) {
+  const dir = path.join(__dirname, 'migrations');
+  if (!fs.existsSync(dir)) return;
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  for (const f of files) {
+    const sql = fs.readFileSync(path.join(dir, f), 'utf8');
+    try {
+      await db.query(sql);
+      console.log('Applied migration', f);
+    } catch (e) {
+      console.warn('migration', f, e.message);
+    }
+  }
+}
+
 let db;
 let server;
 
@@ -51,6 +66,12 @@ async function start() {
     console.log('Database connection OK');
   } catch (err) {
     console.warn('Database not ready yet:', err.message);
+    if (isProd) process.exit(1);
+  }
+  try {
+    await applyMigrations(db);
+  } catch (err) {
+    console.warn('migrations:', err.message);
     if (isProd) process.exit(1);
   }
   const app = createApp({ db });

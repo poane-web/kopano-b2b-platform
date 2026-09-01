@@ -1,40 +1,53 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from 'react-query';
 import { Link } from 'react-router-dom';
 import { api } from '../../api/client';
+import { ErrorState, Spinner, Stat } from '../../components/ui';
+import { money } from '../../lib/format';
+import { useAuth } from '../../hooks/useAuth';
 
 export default function SupplierDashboard() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
+  const { user } = useAuth();
+  const { data, isLoading, error, refetch } = useQuery('wholesaler-dash', () => api.supplier.dashboard());
+  const groups = useQuery('wholesaler-groups', () => api.supplier.groups());
+  const orders = useQuery('wholesaler-orders', () => api.supplier.orders());
 
-  useEffect(() => {
-    api.supplier.dashboard().then(setData).catch((e) => setError(e.message));
-  }, []);
+  if (isLoading) return <Spinner label="Loading wholesaler overview" />;
+  if (error) return <ErrorState message={error.message} onRetry={refetch} />;
+
+  const awaiting = (orders.data || []).filter((o) => ['paid', 'group_filling', 'ordered'].includes(o.status)).slice(0, 5);
 
   return (
-    <div className="pb-8">
-      <h2 className="text-xl font-semibold mb-4">Supplier dashboard</h2>
-      {error && <p className="text-sm text-red-600">{error}</p>}
-      {data && (
-        <div className="grid grid-cols-3 gap-3 mb-6">
-          <div className="bg-white border rounded-xl p-3 text-center">
-            <div className="text-xs text-gray-500">Groups</div>
-            <div className="text-lg font-semibold">{data.groups}</div>
-          </div>
-          <div className="bg-white border rounded-xl p-3 text-center">
-            <div className="text-xs text-gray-500">Orders</div>
-            <div className="text-lg font-semibold">{data.orders}</div>
-          </div>
-          <div className="bg-white border rounded-xl p-3 text-center">
-            <div className="text-xs text-gray-500">Payout est.</div>
-            <div className="text-lg font-semibold">P{data.estimatedPayout}</div>
-          </div>
-        </div>
-      )}
-      <div className="flex flex-col gap-2 text-sm">
-        <Link to="/supplier/orders" className="underline">Orders</Link>
-        <Link to="/supplier/analytics" className="underline">Analytics</Link>
-        <Link to="/supplier/delivery" className="underline">Deliveries</Link>
+    <div>
+      <p className="label">Wholesaler</p>
+      <h1 className="page-title mt-1">{user?.name || user?.business_name || 'Overview'}</h1>
+      <p className="text-sm text-muted mt-1 mb-6">Live figures from your groups and orders. Payout is merchandise minus platform fee on paid orders.</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+        <Stat label="Buying groups" value={data.groups} hint={`${data.openGroups ?? '—'} open`} />
+        <Stat label="Orders" value={data.orders} hint={`${data.pendingOrders ?? 0} awaiting payment`} />
+        <Stat label="Paid orders" value={data.paidOrders ?? '—'} />
+        <Stat label="Est. payout" value={money(data.estimatedPayout)} />
       </div>
+      <div className="grid sm:grid-cols-3 gap-3 mb-8">
+        <Link to="/wholesaler/groups" className="btn-secondary">Buying groups</Link>
+        <Link to="/wholesaler/catalogue" className="btn-secondary">Upload catalogue</Link>
+        <Link to="/wholesaler/deliveries" className="btn-secondary">Deliveries</Link>
+      </div>
+      <h2 className="font-bold mb-3">Orders needing fulfilment</h2>
+      <div className="space-y-2">
+        {awaiting.length === 0 && <p className="text-sm text-muted">No paid orders waiting on you right now.</p>}
+        {awaiting.map((o) => (
+          <Link key={o.id} to={`/wholesaler/orders/${o.id}`} className="card flex justify-between">
+            <div>
+              <div className="font-semibold">{o.product_name}</div>
+              <div className="text-xs text-muted">{o.order_number} · {o.client_name || 'Client'}</div>
+            </div>
+            <div className="text-sm font-medium">{o.status}</div>
+          </Link>
+        ))}
+      </div>
+      {groups.data && (
+        <p className="text-xs text-muted mt-6">{groups.data.length} groups in your catalogue.</p>
+      )}
     </div>
   );
 }

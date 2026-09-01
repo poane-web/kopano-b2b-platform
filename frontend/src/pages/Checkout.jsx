@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { isPaymentConfirmed, money } from '../lib/format';
+
+const METHODS = [
+  { id: 'orange_money', label: 'Orange Money', hint: 'Recommended in Botswana' },
+  { id: 'mascom_wallet', label: 'Mascom wallet', hint: 'Label only — not yet connected' },
+  { id: 'card', label: 'Card (DPO)', hint: 'Requires merchant activation' },
+];
 
 export default function Checkout() {
   const location = useLocation();
@@ -27,7 +34,16 @@ export default function Checkout() {
     }
   }, [order]);
 
-  if (!group && !order) return <div className="p-4">No group selected</div>;
+  if (!group && !order) {
+    return (
+      <div className="card">
+        <p className="font-semibold">No group selected</p>
+        <button type="button" className="btn-primary mt-4" onClick={() => navigate('/buy')}>
+          Browse groups
+        </button>
+      </div>
+    );
+  }
 
   const g = group || {};
   const maxQty = Math.max(1, g.remaining_quantity ?? 99);
@@ -35,10 +51,15 @@ export default function Checkout() {
   const estRetail = Number(g.retail_price || 0);
   const estSubtotal = qty * estUnit;
   const estSavings = qty * (estRetail - estUnit);
+  const serverTotal = order?.breakdown?.grandTotal ?? order?.total;
 
   async function handlePay() {
     if (!online) {
       setError('You are offline. Payment cannot be started until you reconnect.');
+      return;
+    }
+    if (method !== 'orange_money') {
+      setError('Only Orange Money is available until other providers are activated.');
       return;
     }
     setPaying(true);
@@ -64,28 +85,21 @@ export default function Checkout() {
       current.idempotencyKey = idempotencyKey;
       sessionStorage.setItem('kopano_checkout', JSON.stringify(current));
 
-      if (method === 'orange_money') {
-        const pay = await api.payments.orangeMoney(current.orderId, { idempotencyKey });
-        sessionStorage.removeItem('kopano_checkout');
-        if (pay.paymentUrl) {
-          window.location.href = pay.paymentUrl;
-          return;
-        }
-        navigate('/success', {
-          state: {
-            total: current.total,
-            orderId: current.orderId,
-            pending: pay.status !== 'paid',
-            sandbox: !!pay.sandbox,
-            transactionId: pay.transactionId,
-            paymentStatus: pay.status,
-          },
-        });
+      const pay = await api.payments.orangeMoney(current.orderId, { idempotencyKey });
+      sessionStorage.removeItem('kopano_checkout');
+      if (pay.paymentUrl) {
+        window.location.href = pay.paymentUrl;
         return;
       }
-
       navigate('/success', {
-        state: { total: current.total, orderId: current.orderId, pending: true },
+        state: {
+          total: current.total,
+          orderId: current.orderId,
+          pending: !isPaymentConfirmed(pay.status),
+          sandbox: !!pay.sandbox,
+          transactionId: pay.transactionId,
+          paymentStatus: pay.status,
+        },
       });
     } catch (err) {
       setError(err.message || 'Payment failed');
@@ -95,65 +109,85 @@ export default function Checkout() {
   }
 
   return (
-    <div className="pb-24">
-      <h2 className="text-xl font-medium mb-5">Place order</h2>
+    <div className="pb-32 lg:pb-8 max-w-lg">
+      <h2 className="page-title mb-1">Checkout</h2>
+      <p className="text-sm text-muted mb-5">
+        Capacity is reserved when you place the order. Final total comes from the server.
+      </p>
       {!online && (
-        <div className="mb-4 p-3 rounded-xl bg-amber-50 text-amber-800 text-sm">
+        <div className="mb-4 p-3 rounded-lg bg-amber-soft text-amber text-sm">
           Offline — payments are disabled until you reconnect.
         </div>
       )}
-      {error && (
-        <div className="mb-4 p-3 rounded-xl bg-red-50 text-red-700 text-sm border border-red-100">{error}</div>
-      )}
+      {error && <div className="mb-4 p-3 rounded-lg bg-danger-soft text-danger text-sm">{error}</div>}
 
-      <div className="bg-white border rounded-xl p-4 mb-4">
-        <div className="flex justify-between mb-2">
-          <span className="text-gray-500">{g.product_name}</span>
-          <span className="font-medium">P{estUnit}/unit</span>
+      <div className="card mb-4">
+        <div className="font-bold">{g.product_name}</div>
+        <div className="text-sm text-muted">
+          {g.supplier_name} · {money(estUnit)} / unit
         </div>
-        <div className="flex items-center gap-3 my-3">
-          <button type="button" onClick={() => setQty(Math.max(1, qty - 1))} className="w-8 h-8 rounded-lg bg-gray-100 border">
-            −
-          </button>
-          <span className="text-lg font-medium w-10 text-center">{qty}</span>
-          <button type="button" onClick={() => setQty(Math.min(maxQty, qty + 1))} className="w-8 h-8 rounded-lg bg-gray-100 border">
-            +
-          </button>
+        {!order && (
+          <div className="flex items-center gap-3 my-3">
+            <button type="button" onClick={() => setQty(Math.max(1, qty - 1))} className="w-11 h-11 rounded-lg bg-clay font-bold">
+              −
+            </button>
+            <span className="text-lg font-extrabold w-8 text-center">{qty}</span>
+            <button type="button" onClick={() => setQty(Math.min(maxQty, qty + 1))} className="w-11 h-11 rounded-lg bg-clay font-bold">
+              +
+            </button>
+          </div>
+        )}
+        <div className="flex justify-between text-sm pt-3 border-t border-line">
+          <span className="text-muted">Est. save vs retail</span>
+          <span className="text-success font-semibold">{money(estSavings)}</span>
         </div>
-        <div className="flex justify-between pt-3 border-t text-sm">
-          <span className="text-gray-500">Est. save vs retail</span>
-          <span className="text-green-600 font-medium">P{estSavings.toFixed(2)}</span>
-        </div>
-        <p className="text-xs text-gray-400 mt-2">Final total is calculated by the server (includes fees).</p>
+        {order?.breakdown && (
+          <div className="mt-3 text-sm space-y-1">
+            <div className="flex justify-between">
+              <span className="text-muted">Subtotal</span>
+              <span>{money(order.breakdown.subtotal)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted">Platform fee</span>
+              <span>{money(order.breakdown.platformFee)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-muted">Delivery</span>
+              <span>{money(order.breakdown.deliveryFee)}</span>
+            </div>
+            <div className="flex justify-between font-bold pt-1">
+              <span>Total</span>
+              <span>{money(order.breakdown.grandTotal)}</span>
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="text-sm font-medium mb-2.5">Payment method</div>
+      <div className="label mb-2">Payment method</div>
       <div className="flex flex-col gap-2 mb-5">
-        {['orange_money', 'mascom_wallet', 'card'].map((m) => (
+        {METHODS.map((m) => (
           <label
-            key={m}
-            className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer ${
-              method === m ? 'border-gray-900 bg-gray-50' : 'border-gray-200'
+            key={m.id}
+            className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer ${
+              method === m.id ? 'border-forest bg-success-soft/40' : 'border-line bg-paper'
             }`}
           >
-            <input type="radio" name="pay" checked={method === m} onChange={() => setMethod(m)} className="accent-gray-900" />
-            <span className="font-medium capitalize">{m.replace('_', ' ')}</span>
+            <input type="radio" name="pay" checked={method === m.id} onChange={() => setMethod(m.id)} className="mt-1 accent-forest" />
+            <span>
+              <span className="font-semibold block">{m.label}</span>
+              <span className="text-xs text-muted">{m.hint}</span>
+            </span>
           </label>
         ))}
       </div>
 
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t max-w-lg mx-auto">
-        <div className="flex justify-between mb-3">
-          <span className="text-gray-500">Est. merchandise</span>
-          <span className="text-xl font-medium">P{estSubtotal.toFixed(2)}</span>
+      <div className="fixed bottom-0 inset-x-0 lg:static bg-paper border-t border-line lg:border-0 p-4">
+        <div className="flex justify-between mb-3 max-w-lg mx-auto">
+          <span className="text-muted">Due now</span>
+          <span className="text-xl font-extrabold">{money(serverTotal ?? estSubtotal)}</span>
         </div>
-        <button
-          type="button"
-          onClick={handlePay}
-          disabled={paying || !online}
-          className="w-full bg-gray-900 text-white py-3 rounded-xl font-medium disabled:opacity-50"
-        >
-          {paying ? 'Processing...' : 'Pay now'}
+        <button type="button" onClick={handlePay} disabled={paying || !online} className="btn-primary max-w-lg mx-auto">
+          {paying ? 'Processing…' : 'Pay with Orange Money'}
         </button>
       </div>
     </div>

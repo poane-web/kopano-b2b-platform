@@ -1,41 +1,39 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from 'react-query';
+import { Link } from 'react-router-dom';
 import { api } from '../api/client';
+import { ErrorState, Spinner, Stat } from '../components/ui';
+import { money } from '../lib/format';
 
 export default function Admin() {
-  const [stats, setStats] = useState(null);
-  const [error, setError] = useState('');
+  const { data: stats, isLoading, error, refetch } = useQuery('admin-stats', () => api.admin.stats());
 
-  useEffect(() => {
-    api.admin
-      .stats()
-      .then(setStats)
-      .catch((e) => setError(e.message));
-  }, []);
+  if (isLoading) return <Spinner label="Loading admin overview" />;
+  if (error) return <ErrorState message={error.message || 'Admin access denied.'} onRetry={refetch} />;
 
   return (
     <div>
-      <h1 className="text-xl font-bold">Admin</h1>
-      {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
-      {stats && (
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div className="card">
-            <div className="text-xs text-gray-500">Users</div>
-            <div className="text-xl font-semibold">{stats.totalUsers}</div>
-          </div>
-          <div className="card">
-            <div className="text-xs text-gray-500">Revenue</div>
-            <div className="text-xl font-semibold">P{stats.totalRevenue}</div>
-          </div>
-          <div className="card">
-            <div className="text-xs text-gray-500">Open groups</div>
-            <div className="text-xl font-semibold">{stats.activeGroups}</div>
-          </div>
-          <div className="card">
-            <div className="text-xs text-gray-500">Avg fill</div>
-            <div className="text-xl font-semibold">{stats.avgFillRate}%</div>
-          </div>
-        </div>
-      )}
+      <h1 className="page-title mb-1">Platform overview</h1>
+      <p className="text-sm text-muted mb-6">Figures come from live admin APIs. Nothing here is estimated.</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
+        <Stat label="Users" value={stats.totalUsers} />
+        <Stat label="Completed payments" value={money(stats.totalRevenue)} />
+        <Stat label="Open groups" value={stats.activeGroups} />
+        <Stat label="Avg fill" value={`${stats.avgFillRate}%`} />
+      </div>
+      <div className="grid sm:grid-cols-3 gap-3">
+        <Link to="/admin/clients" className="card hover:shadow-lift">
+          <div className="font-bold">Clients</div>
+          <p className="text-sm text-muted mt-1">Shops, agents, wholesalers and roles.</p>
+        </Link>
+        <Link to="/admin/groups" className="card hover:shadow-lift">
+          <div className="font-bold">Buying groups</div>
+          <p className="text-sm text-muted mt-1">Capacity, status and wholesaler.</p>
+        </Link>
+        <Link to="/admin/revenue" className="card hover:shadow-lift">
+          <div className="font-bold">Revenue</div>
+          <p className="text-sm text-muted mt-1">Completed payments and fees by month.</p>
+        </Link>
+      </div>
     </div>
   );
 }

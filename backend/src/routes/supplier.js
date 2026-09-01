@@ -31,7 +31,7 @@ router.get('/dashboard', async (req, res) => {
   const db = req.app.locals.db;
   const sid = supplierId(req);
   try {
-    const [groups, orders, revenue] = await Promise.all([
+    const [groups, orders, revenue, extra] = await Promise.all([
       db.query(`SELECT COUNT(*)::int AS count FROM buying_groups WHERE supplier_id = $1`, [sid]),
       db.query(
         `SELECT COUNT(*)::int AS count FROM orders o
@@ -44,14 +44,72 @@ router.get('/dashboard', async (req, res) => {
          WHERE g.supplier_id = $1 AND o.status IN ('paid','group_filling','ordered','ready_pickup','delivered')`,
         [sid]
       ),
+      db.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM buying_groups WHERE supplier_id = $1 AND status = 'open') AS open_groups,
+           (SELECT COUNT(*)::int FROM buying_groups WHERE supplier_id = $1 AND status IN ('filled','ordering')) AS filled_groups,
+           (SELECT COUNT(*)::int FROM orders o JOIN buying_groups g ON g.id = o.group_id
+             WHERE g.supplier_id = $1 AND o.status IN ('paid','group_filling','ordered','ready_pickup','delivered')) AS paid_orders,
+           (SELECT COUNT(*)::int FROM orders o JOIN buying_groups g ON g.id = o.group_id
+             WHERE g.supplier_id = $1 AND o.status IN ('pending_payment','payment_initiated')) AS pending_orders`,
+        [sid]
+      ),
     ]);
     res.json({
       groups: groups.rows[0].count,
       orders: orders.rows[0].count,
       estimatedPayout: revenue.rows[0].total,
+      openGroups: extra.rows[0].open_groups,
+      filledGroups: extra.rows[0].filled_groups,
+      paidOrders: extra.rows[0].paid_orders,
+      pendingOrders: extra.rows[0].pending_orders,
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to load dashboard', code: 'SERVER_ERROR' });
+  }
+});
+
+router.get('/groups', async (req, res) => {
+  const db = req.app.locals.db;
+  const sid = supplierId(req);
+  try {
+    const result = await db.query(
+      `SELECT g.id, g.product_name, g.category, g.description, g.unit_price, g.retail_price,
+              g.target_quantity, g.current_quantity, g.reserved_quantity, g.confirmed_quantity,
+              g.unit, g.deadline, g.status, g.pickup_location, g.created_at,
+              GREATEST(g.target_quantity - g.current_quantity, 0) AS remaining_quantity,
+              COUNT(o.id)::int AS order_count
+       FROM buying_groups g
+       LEFT JOIN orders o ON o.group_id = g.id AND o.reservation_status IN ('reserved','confirmed')
+       WHERE g.supplier_id = $1
+       GROUP BY g.id
+       ORDER BY g.created_at DESC`,
+      [sid]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load groups', code: 'SERVER_ERROR' });
+  }
+});
+
+router.get('/deliveries', async (req, res) => {
+  const db = req.app.locals.db;
+  const sid = supplierId(req);
+  try {
+    const result = await db.query(
+      `SELECT d.id, d.status, d.notes, d.created_at, d.group_id, d.order_id,
+              g.product_name, g.pickup_location, o.order_number
+       FROM deliveries d
+       LEFT JOIN buying_groups g ON g.id = d.group_id
+       LEFT JOIN orders o ON o.id = d.order_id
+       WHERE d.supplier_id = $1
+       ORDER BY d.created_at DESC
+       LIMIT 200`,
+      [sid]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load deliveries', code: 'SERVER_ERROR' });
   }
 });
 
@@ -60,10 +118,12 @@ router.get('/orders', async (req, res) => {
   const sid = supplierId(req);
   try {
     const result = await db.query(
-      `SELECT o.id, o.order_number, o.quantity, o.status, o.created_at, o.unit_price,
-              g.product_name, g.id AS group_id
+      `SELECT o.id, o.order_number, o.quantity, o.status, o.created_at, o.unit_price, o.total_amount,
+              g.product_name, g.id AS group_id, g.pickup_location,
+              u.business_name AS client_name, u.location AS client_location
        FROM orders o
        JOIN buying_groups g ON g.id = o.group_id
+       LEFT JOIN users u ON u.id = o.user_id
        WHERE g.supplier_id = $1
        ORDER BY o.created_at DESC
        LIMIT 200`,
@@ -80,10 +140,12 @@ router.get('/orders/:id', async (req, res) => {
   const sid = supplierId(req);
   try {
     const result = await db.query(
-      `SELECT o.id, o.order_number, o.quantity, o.status, o.created_at, o.unit_price,
-              g.product_name, g.id AS group_id
+      `SELECT o.id, o.order_number, o.quantity, o.status, o.created_at, o.unit_price, o.total_amount,
+              o.payment_method, g.product_name, g.id AS group_id, g.pickup_location,
+              u.business_name AS client_name, u.location AS client_location, u.phone AS client_phone
        FROM orders o
        JOIN buying_groups g ON g.id = o.group_id
+       LEFT JOIN users u ON u.id = o.user_id
        WHERE o.id = $1 AND g.supplier_id = $2`,
       [req.params.id, sid]
     );

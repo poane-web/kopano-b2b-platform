@@ -102,6 +102,24 @@ describe('authorization, isolation, payments, concurrency', async () => {
     assert.notEqual(dashA.json.orders, dashB.json.orders);
   });
 
+  it('supplier groups and deliveries are scoped to the authenticated supplier', async () => {
+    const groupsA = await request(base, 'GET', '/api/supplier-app/groups', { token: tokenFor(supplierA.user) });
+    const groupsB = await request(base, 'GET', '/api/supplier-app/groups', { token: tokenFor(supplierB.user) });
+    assert.equal(groupsA.status, 200);
+    assert.equal(groupsB.status, 200);
+    assert.ok(Array.isArray(groupsA.json));
+    assert.ok(groupsA.json.some((g) => g.id === groupA.id));
+    assert.ok(!groupsA.json.some((g) => g.id === groupB.id));
+    assert.ok(groupsB.json.some((g) => g.id === groupB.id));
+    assert.ok(!groupsB.json.some((g) => g.id === groupA.id));
+
+    const deliveriesA = await request(base, 'GET', '/api/supplier-app/deliveries', {
+      token: tokenFor(supplierA.user),
+    });
+    assert.equal(deliveriesA.status, 200);
+    assert.ok(Array.isArray(deliveriesA.json));
+  });
+
   it('customer cannot access supplier-app', async () => {
     const res = await request(base, 'GET', '/api/supplier-app/dashboard', { token: tokenFor(customerA) });
     assert.equal(res.status, 403);
@@ -126,6 +144,15 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(agentUser, { agentId: agent.id }),
     });
     assert.equal(res.status, 403);
+  });
+
+  it('agent shops lists only shops this agent activated', async () => {
+    const tok = tokenFor(agentUser, { agentId: agent.id });
+    const shops = await request(base, 'GET', '/api/agents/shops', { token: tok });
+    assert.equal(shops.status, 200);
+    assert.ok(Array.isArray(shops.json));
+    const asCustomer = await request(base, 'GET', '/api/agents/shops', { token: tokenFor(customerA) });
+    assert.equal(asCustomer.status, 403);
   });
 
   it('concurrent last-unit orders: exactly one succeeds', async () => {

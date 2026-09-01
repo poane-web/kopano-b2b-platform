@@ -1,23 +1,33 @@
-﻿import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useGroup } from '../hooks/useGroups';
 import { useState } from 'react';
+import { formatDeadline, money } from '../lib/format';
+import { useNow } from '../hooks/useOnlineStatus';
+import { ErrorState, Spinner } from '../components/ui';
 
 export default function GroupDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: group, isLoading } = useGroup(id);
+  const now = useNow(30000);
+  const { data: group, isLoading, error, refetch } = useGroup(id);
   const [quantity, setQuantity] = useState(1);
-  
-  if (isLoading) return <div className="p-4">Loading...</div>;
-  if (!group) return <div className="p-4">Group not found</div>;
-  
-  const pct = Math.round(group.fill_percentage);
-  const isFilled = pct >= 100;
-  const savings = (group.retail_price - group.unit_price);
-  
+
+  if (isLoading) return <Spinner label="Loading group" />;
+  if (error) return <ErrorState message="Could not load this group." onRetry={refetch} />;
+  if (!group) return <ErrorState message="Group not found." />;
+
+  const pct = Math.round(Number(group.fill_percentage || 0));
+  const remaining = Number(
+    group.remaining_quantity ?? Math.max(0, group.target_quantity - group.current_quantity)
+  );
+  const savings = Number(group.retail_price) - Number(group.unit_price);
+  const maxQty = Math.max(1, remaining || 1);
+  const deadlineLabel = formatDeadline(group.deadline, now);
+  const canJoin = group.is_open !== false && remaining > 0 && group.status === 'open' && deadlineLabel !== 'Closed';
+
   function handleBuy() {
-    navigate('/checkout', { 
-      state: { 
+    navigate('/checkout', {
+      state: {
         group: {
           id: group.id,
           product_name: group.product_name,
@@ -25,97 +35,99 @@ export default function GroupDetail() {
           retail_price: group.retail_price,
           unit: group.unit,
           pickup_location: group.pickup_location,
+          remaining_quantity: remaining,
+          supplier_name: group.supplier_name,
         },
-        quantity 
-      } 
+        quantity,
+      },
     });
   }
-  
+
   return (
-    <div className="pb-24">
-      <button onClick={() => navigate('/dashboard')} className="text-gray-500 text-sm mb-4">
-        ← Back to groups
+    <div className="pb-36 lg:pb-8">
+      <button type="button" onClick={() => navigate('/buy')} className="text-sm text-muted font-medium mb-4">
+        ← All groups
       </button>
-      
-      <div className="flex items-center gap-3 mb-4">
-        <div className="w-14 h-14 bg-gray-100 rounded-xl flex items-center justify-center text-2xl">
-          {group.category === 'food' ? '🌾' : group.category === 'construction' ? '🏗️' : group.category === 'beauty' ? '💇' : '📦'}
-        </div>
-        <div>
-          <h1 className="text-lg font-semibold">{group.product_name}</h1>
-          <p className="text-sm text-gray-500 capitalize">{group.category}</p>
-        </div>
-      </div>
-      
-      <div className="card mb-4">
+      <p className="label">{group.supplier_name || 'Wholesaler'}</p>
+      <h1 className="page-title mt-1">{group.product_name}</h1>
+      <p className="text-sm text-muted capitalize mt-1">
+        {group.category} · {group.unit}
+      </p>
+
+      <div className="card mt-5">
         <div className="flex justify-between items-end mb-3">
           <div>
-            <div className="text-sm text-gray-500">Group price</div>
-            <div className="text-3xl font-semibold">P{group.unit_price}</div>
+            <div className="label">Wholesale</div>
+            <div className="text-3xl font-extrabold">{money(group.unit_price)}</div>
           </div>
           <div className="text-right">
-            <div className="text-sm text-gray-500">Retail</div>
-            <div className="text-gray-400 line-through">P{group.retail_price}</div>
+            <div className="label">Retail</div>
+            <div className="text-muted line-through">{money(group.retail_price)}</div>
           </div>
         </div>
-        
-        <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-2">
-          <div 
-            className={`h-full rounded-full ${isFilled ? 'bg-green-500' : 'bg-gray-900'}`}
-            style={{ width: `${Math.min(pct, 100)}%` }}
-          />
+        <div className="h-2 bg-clay rounded-full overflow-hidden mb-2">
+          <div className={`h-full ${pct >= 100 ? 'bg-success' : 'bg-forest'}`} style={{ width: `${Math.min(pct, 100)}%` }} />
         </div>
-        <div className="flex justify-between text-sm text-gray-500">
-          <span>{group.current_quantity} / {group.target_quantity} {group.unit}</span>
-          <span>{pct}%</span>
-        </div>
-      </div>
-      
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="card text-center py-3">
-          <div className="text-sm text-gray-500">Save per unit</div>
-          <div className="text-lg font-semibold text-green-600">P{savings}</div>
-        </div>
-        <div className="card text-center py-3">
-          <div className="text-sm text-gray-500">Members joined</div>
-          <div className="text-lg font-semibold">{group.member_count || 0}</div>
+        <div className="flex justify-between text-sm text-muted">
+          <span>
+            {group.current_quantity} / {group.target_quantity} {group.unit}
+          </span>
+          <span>
+            {remaining} remaining · {pct}%
+          </span>
         </div>
       </div>
-      
-      <div className="card mb-4">
-        <div className="text-sm font-medium mb-2">How it works</div>
-        <ol className="text-sm text-gray-500 space-y-1 list-decimal list-inside">
-          <li>Place your order and pay</li>
-          <li>We aggregate until the group fills</li>
-          <li>Supplier delivers to hub</li>
-          <li>You pick up your stock</li>
-        </ol>
+
+      <div className="grid grid-cols-2 gap-3 mt-3">
+        <div className="card">
+          <div className="label">Save per unit</div>
+          <div className="text-lg font-extrabold text-success mt-1">{money(savings)}</div>
+        </div>
+        <div className="card">
+          <div className="label">Shops in group</div>
+          <div className="text-lg font-extrabold mt-1">{group.member_count || 0}</div>
+        </div>
       </div>
-      
-      <div className="card mb-6">
-        <div className="text-sm font-medium mb-1">Pickup location</div>
-        <div className="text-sm text-gray-500">{group.pickup_location || 'Gaborone Central Hub'}</div>
-        <div className="text-sm text-gray-400 mt-1">Mon-Fri, 08:00-17:00</div>
+
+      <div className="card mt-3">
+        <div className="font-semibold mb-1">Pickup</div>
+        <p className="text-sm text-muted">{group.pickup_location || 'Hub to be confirmed'}</p>
+        <p className="text-sm text-muted mt-1">{deadlineLabel || 'Open'}</p>
       </div>
-      
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t">
-        <div className="flex items-center gap-4 mb-3">
-          <button 
-            onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center font-medium"
-          >−</button>
-          <span className="text-xl font-semibold w-8 text-center">{quantity}</span>
-          <button 
-            onClick={() => setQuantity(quantity + 1)}
-            className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center font-medium"
-          >+</button>
+
+      {group.description && (
+        <div className="card mt-3">
+          <div className="font-semibold mb-1">About this deal</div>
+          <p className="text-sm text-muted leading-relaxed">{group.description}</p>
+        </div>
+      )}
+
+      <div className="fixed bottom-0 inset-x-0 lg:static lg:mt-6 bg-paper border-t border-line lg:border lg:rounded-xl p-4">
+        <div className="max-w-app mx-auto flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setQuantity(Math.max(1, quantity - 1))}
+              className="w-11 h-11 bg-clay rounded-lg font-bold"
+            >
+              −
+            </button>
+            <span className="text-xl font-extrabold w-8 text-center">{quantity}</span>
+            <button
+              type="button"
+              onClick={() => setQuantity(Math.min(maxQty, quantity + 1))}
+              className="w-11 h-11 bg-clay rounded-lg font-bold"
+            >
+              +
+            </button>
+          </div>
           <div className="flex-1 text-right">
-            <div className="text-sm text-gray-500">Total</div>
-            <div className="text-xl font-semibold">P{quantity * group.unit_price}</div>
+            <div className="text-xs text-muted">Merchandise</div>
+            <div className="text-lg font-extrabold">{money(quantity * Number(group.unit_price))}</div>
           </div>
         </div>
-        <button onClick={handleBuy} className="btn-primary">
-          Join this group
+        <button type="button" onClick={handleBuy} disabled={!canJoin} className="btn-primary mt-3">
+          {canJoin ? 'Join this group' : 'Group not open'}
         </button>
       </div>
     </div>

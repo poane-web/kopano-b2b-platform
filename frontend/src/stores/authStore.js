@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import { homePath } from '../lib/format';
 
 export const useAuthStore = create((set) => ({
   user: null,
@@ -27,7 +28,15 @@ export const useAuthStore = create((set) => ({
     const res = await api.auth.login(phone, pin);
     localStorage.setItem('kopano_token', res.token);
     if (res.refreshToken) localStorage.setItem('kopano_refresh', res.refreshToken);
-    set({ user: res.user, token: res.token, isAuthenticated: true });
+    set({ user: res.user, token: res.token, isAuthenticated: true, isLoading: false });
+    return res;
+  },
+
+  loginSupplier: async (email, password) => {
+    const res = await api.supplier.login(email, password);
+    localStorage.setItem('kopano_token', res.token);
+    if (res.refreshToken) localStorage.setItem('kopano_refresh', res.refreshToken);
+    set({ user: res.user, token: res.token, isAuthenticated: true, isLoading: false });
     return res;
   },
 
@@ -35,7 +44,7 @@ export const useAuthStore = create((set) => ({
     const res = await api.auth.register(data);
     localStorage.setItem('kopano_token', res.token);
     if (res.refreshToken) localStorage.setItem('kopano_refresh', res.refreshToken);
-    set({ user: res.user, token: res.token, isAuthenticated: true });
+    set({ user: res.user, token: res.token, isAuthenticated: true, isLoading: false });
     return res;
   },
 
@@ -47,4 +56,5 @@ export const useAuthStore = create((set) => ({
   },
 
   setUser: (user) => set({ user }),
+  homePath: () => homePath(useAuthStore.getState().user?.role),
 }));

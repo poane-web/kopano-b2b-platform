@@ -37,6 +37,26 @@ router.get('/my-stats', async (req, res) => {
   }
 });
 
+router.get('/shops', async (req, res) => {
+  const db = req.app.locals.db;
+  try {
+    const agent = await agentRow(db, req);
+    if (!agent) return res.status(403).json({ error: 'Not an active agent', code: 'FORBIDDEN' });
+    const shops = await db.query(
+      `SELECT u.id, u.business_name, u.phone, u.category, u.location, u.created_at, aa.created_at AS activated_at
+       FROM agent_activations aa
+       JOIN users u ON u.id = aa.shop_user_id
+       WHERE aa.agent_id = $1
+       ORDER BY aa.created_at DESC
+       LIMIT 200`,
+      [agent.id]
+    );
+    res.json(shops.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to load shops', code: 'SERVER_ERROR' });
+  }
+});
+
 router.post('/activation', async (req, res) => {
   const db = req.app.locals.db;
   const { businessName, category, location, pin } = req.body;

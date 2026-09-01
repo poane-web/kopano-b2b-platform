@@ -52,6 +52,8 @@ async function request(endpoint, options = {}, { retry = true } = {}) {
     const e = new Error(err.error || `HTTP ${res.status}`);
     e.code = err.code;
     e.status = res.status;
+    e.errors = err.errors;
+    e.payload = err;
     throw e;
   }
   return res.json();
@@ -73,7 +75,7 @@ export const api = {
   orders: {
     create: (data) => request('/orders', { method: 'POST', body: JSON.stringify(data) }),
     my: () => request('/orders/my'),
-    get: (id) => request(`/orders/${id}`),
+    cancel: (id) => request(`/orders/${id}/cancel`, { method: 'POST' }),
   },
   payments: {
     orangeMoney: (orderId, extra = {}) =>
@@ -100,8 +102,10 @@ export const api = {
     login: (email, password) =>
       request('/auth/supplier-login', { method: 'POST', body: JSON.stringify({ email, password }) }),
     dashboard: () => request('/supplier-app/dashboard'),
-    orders: (params = '') => request(`/supplier-app/orders?${params}`),
+    groups: () => request('/supplier-app/groups'),
+    orders: (params = '') => request(`/supplier-app/orders${params ? `?${params}` : ''}`),
     order: (id) => request(`/supplier-app/orders/${id}`),
+    deliveries: () => request('/supplier-app/deliveries'),
     deliver: (data) =>
       request('/supplier-app/deliveries', { method: 'POST', body: JSON.stringify(data) }),
     analytics: (period) => request(`/supplier-app/analytics?period=${period || '30days'}`),
@@ -115,6 +119,7 @@ export const api = {
   },
   agent: {
     myStats: () => request('/agents/my-stats'),
+    shops: () => request('/agents/shops'),
     registerShop: (data) => request('/agents/activation', { method: 'POST', body: JSON.stringify(data) }),
     assistOrder: (orderId) =>
       request('/agents/order-assist', { method: 'POST', body: JSON.stringify({ orderId }) }),

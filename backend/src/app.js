@@ -77,14 +77,20 @@ function createApp({ db, disableRateLimit = false } = {}) {
   app.locals.db = db;
 
   const skipLimit = disableRateLimit || process.env.DISABLE_RATE_LIMIT === 'true';
+  const rateLimitOpts = {
+    windowMs: 15 * 60 * 1000,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Reverse proxies (Vite, nginx, preview) send Forwarded. Do not crash
+    // when trust proxy is off; production still sets trust proxy for IP keys.
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+  };
   if (!skipLimit) {
     app.use(
       '/api',
       rateLimit({
-        windowMs: 15 * 60 * 1000,
+        ...rateLimitOpts,
         max: parseInt(process.env.RATE_LIMIT_MAX || '300', 10),
-        standardHeaders: true,
-        legacyHeaders: false,
         message: { error: 'Too many requests', code: 'RATE_LIMIT' },
       })
     );
@@ -93,20 +99,16 @@ function createApp({ db, disableRateLimit = false } = {}) {
   const authLimiter = skipLimit
     ? (_req, _res, next) => next()
     : rateLimit({
-        windowMs: 15 * 60 * 1000,
+        ...rateLimitOpts,
         max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '20', 10),
-        standardHeaders: true,
-        legacyHeaders: false,
         message: { error: 'Too many authentication attempts', code: 'AUTH_RATE_LIMIT' },
       });
 
   const paymentLimiter = skipLimit
     ? (_req, _res, next) => next()
     : rateLimit({
-        windowMs: 15 * 60 * 1000,
+        ...rateLimitOpts,
         max: parseInt(process.env.PAYMENT_RATE_LIMIT_MAX || '30', 10),
-        standardHeaders: true,
-        legacyHeaders: false,
         message: { error: 'Too many payment attempts', code: 'PAYMENT_RATE_LIMIT' },
       });
 

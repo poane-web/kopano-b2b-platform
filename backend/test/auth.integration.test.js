@@ -85,4 +85,23 @@ describe('authentication', async () => {
     assert.equal(me.status, 200);
     assert.equal(me.json.business_name, 'Me Co');
   });
+
+  it('rate limiter does not 500 when a proxy sends Forwarded', async () => {
+    const { createApp } = require('../src/app');
+    const limited = createApp({ db, disableRateLimit: false });
+    const extra = await new Promise((resolve) => {
+      const server = limited.listen(0, '127.0.0.1', () => {
+        resolve({ server, base: `http://127.0.0.1:${server.address().port}` });
+      });
+    });
+    try {
+      const res = await request(extra.base, 'GET', '/api/groups', {
+        headers: { Forwarded: 'for=203.0.113.10', 'X-Forwarded-For': '203.0.113.10' },
+      });
+      assert.equal(res.status, 200);
+      assert.ok(Array.isArray(res.json));
+    } finally {
+      await new Promise((r) => extra.server.close(r));
+    }
+  });
 });

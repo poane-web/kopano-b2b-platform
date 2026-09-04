@@ -222,4 +222,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_notif_token
 CREATE INDEX IF NOT EXISTS idx_orders_reservation ON orders(group_id, reservation_status);
 CREATE INDEX IF NOT EXISTS idx_referral_codes_owner ON referral_codes(owner_id);
 CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
+CREATE INDEX IF NOT EXISTS idx_users_supplier ON users(supplier_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_activations_pair ON agent_activations (agent_id, shop_user_id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_supplier ON deliveries(supplier_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+

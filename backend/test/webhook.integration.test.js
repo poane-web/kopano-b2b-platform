@@ -11,6 +11,7 @@ const {
   seedGroup,
   tokenFor,
   signWebhook,
+  hydratePay,
 } = require('./helpers');
 const { hmacHex, verifyRawHmac, parseRawJson } = require('../src/lib/omWebhook');
 
@@ -39,6 +40,7 @@ describe('Orange Money webhook verification', async () => {
       token: tokenFor(customer),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     return { g, order, pay };
   }
 
@@ -178,6 +180,75 @@ describe('Orange Money webhook verification', async () => {
       assert.equal(w.status, 401);
     } finally {
       process.env.OM_REQUIRE_HMAC = prev;
+    }
+  });
+
+  it('does not leak notif_token to the client and rejects client-visible ids as webhook auth', async () => {
+    const g = await seedGroup(db, {
+      supplierId: supplier.supplier.id,
+      target: 20,
+      current: 0,
+      unitPrice: 30,
+      retailPrice: 50,
+    });
+    const order = await request(base, 'POST', '/api/orders', {
+      token: tokenFor(customer),
+      body: { groupId: g.id, quantity: 1, paymentMethod: 'orange_money' },
+    });
+    const pay = await request(base, 'POST', '/api/payments/orange-money', {
+      token: tokenFor(customer),
+      body: { orderId: order.json.id },
+    });
+    assert.equal(pay.status, 200);
+    assert.equal(pay.json.notifToken, undefined);
+    assert.equal(pay.json.externalReference, undefined);
+    const tx = await db.query(`SELECT notif_token, external_reference FROM transactions WHERE id = $1`, [
+      pay.json.transactionId,
+    ]);
+    assert.ok(tx.rows[0].notif_token);
+    assert.notEqual(tx.rows[0].notif_token, tx.rows[0].external_reference);
+
+    const prev = process.env.OM_REQUIRE_HMAC;
+    process.env.OM_REQUIRE_HMAC = 'false';
+    try {
+      const forged = await request(base, 'POST', '/api/payments/webhook/orange-money', {
+        body: { status: 'SUCCESS', notif_token: tx.rows[0].external_reference, txnid: 'MP-LEAK' },
+      });
+      assert.equal(forged.status, 401);
+      const byOrder = await request(base, 'POST', '/api/payments/webhook/orange-money', {
+        body: { status: 'SUCCESS', order_id: order.json.id, txnid: 'MP-LEAK2' },
+      });
+      assert.equal(byOrder.status, 401);
+      const o = await db.query(`SELECT status FROM orders WHERE id = $1`, [order.json.id]);
+      assert.notEqual(o.rows[0].status, 'paid');
+    } finally {
+      process.env.OM_REQUIRE_HMAC = prev;
+    }
+  });
+
+  it('production never marks paid when provider confirmation is skipped', async () => {
+    const { pay, order } = await startPayment();
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const body = {
+        status: 'SUCCESS',
+        notif_token: pay.json.notifToken,
+        txnid: 'MP-PROD-SKIP',
+        amount: pay.json.amount,
+      };
+      const res = await request(base, 'POST', '/api/payments/webhook/orange-money', {
+        body,
+        headers: { 'X-Om-Signature': signWebhook(body) },
+      });
+      assert.equal(res.status, 502, JSON.stringify(res.json));
+      assert.equal(res.json.code, 'PROVIDER_UNCONFIRMED');
+      const o = await db.query(`SELECT status FROM orders WHERE id = $1`, [order.json.id]);
+      assert.notEqual(o.rows[0].status, 'paid');
+      const tx = await db.query(`SELECT status FROM transactions WHERE id = $1`, [pay.json.transactionId]);
+      assert.notEqual(tx.rows[0].status, 'completed');
+    } finally {
+      process.env.NODE_ENV = prevEnv;
     }
   });
 });

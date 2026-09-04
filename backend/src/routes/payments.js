@@ -6,7 +6,7 @@ const router = express.Router();
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const paymentService = require('../services/payments');
 const reservations = require('../services/reservations');
-const { money } = require('../lib/money');
+const { money, mulQty, subMoney } = require('../lib/money');
 const omWebhook = require('../lib/omWebhook');
 
 async function finalizeSuccessfulPayment(client, { orderId, transactionId, externalReference, userId, providerPayload }) {
@@ -37,7 +37,7 @@ async function finalizeSuccessfulPayment(client, { orderId, transactionId, exter
     const o = orderRes.rows[0];
     const group = await client.query(`SELECT retail_price, unit_price FROM buying_groups WHERE id = $1`, [o.group_id]);
     if (group.rows.length) {
-      const savings = money((Number(group.rows[0].retail_price) - Number(group.rows[0].unit_price)) * o.quantity);
+      const savings = mulQty(subMoney(group.rows[0].retail_price, group.rows[0].unit_price), o.quantity);
       await client.query(
         `UPDATE users SET total_savings = total_savings + $1, updated_at = NOW() WHERE id = $2`,
         [savings, userId]
@@ -98,8 +98,6 @@ router.post('/orange-money', authenticate, async (req, res) => {
           success: true,
           status: t.status,
           transactionId: t.id,
-          externalReference: t.external_reference,
-          notifToken: t.notif_token,
           orderId,
           message: 'Existing payment attempt returned (idempotent)',
         });
@@ -128,21 +126,20 @@ router.post('/orange-money', authenticate, async (req, res) => {
         success: true,
         status: t.status,
         transactionId: t.id,
-        externalReference: t.external_reference,
-        notifToken: t.notif_token,
         orderId,
         message: 'Existing payment attempt returned (no duplicate reservation)',
       });
     }
 
     const externalRef = 'OM-' + crypto.randomBytes(8).toString('hex').toUpperCase();
+    const notifToken = crypto.randomBytes(24).toString('hex');
     const amount = money(order.total_amount);
 
     const txRes = await client.query(
       `INSERT INTO transactions (
          order_id, user_id, amount, type, method, external_reference, status, idempotency_key, provider, notif_token
-       ) VALUES ($1,$2,$3,'payment','orange_money',$4,'initiated',$5,'orange_money',$4) RETURNING *`,
-      [orderId, userId, amount, externalRef, idempotencyKey]
+       ) VALUES ($1,$2,$3,'payment','orange_money',$4,'initiated',$5,'orange_money',$6) RETURNING *`,
+      [orderId, userId, amount, externalRef, idempotencyKey, notifToken]
     );
     const tx = txRes.rows[0];
     await client.query(
@@ -170,7 +167,8 @@ router.post('/orange-money', authenticate, async (req, res) => {
       return res.status(502).json({ error: 'Payment provider unavailable', code: 'PROVIDER_ERROR', transactionId: tx.id });
     }
 
-    const notifToken = providerResult?.notif_token || externalRef;
+    const storedNotif =
+      paymentService.isConfigured() && providerResult?.notif_token ? providerResult.notif_token : notifToken;
     const payToken = providerResult?.payment_token || null;
     await db.query(
       `UPDATE transactions
@@ -180,7 +178,7 @@ router.post('/orange-money', authenticate, async (req, res) => {
            provider_payload = $3,
            updated_at = NOW()
        WHERE id = $4`,
-      [notifToken, payToken, JSON.stringify(providerResult || {}), tx.id]
+      [storedNotif, payToken, JSON.stringify(providerResult || {}), tx.id]
     );
 
     const sandboxAutoPay = process.env.PAYMENT_SANDBOX_AUTO_COMPLETE === 'true' && process.env.NODE_ENV !== 'production';
@@ -206,7 +204,6 @@ router.post('/orange-money', authenticate, async (req, res) => {
         success: true,
         status: 'paid',
         transactionId: tx.id,
-        externalReference: externalRef,
         orderId,
         message: 'Sandbox auto-completed (not available in production)',
         sandbox: true,
@@ -217,8 +214,6 @@ router.post('/orange-money', authenticate, async (req, res) => {
       success: true,
       status: 'awaiting_confirmation',
       transactionId: tx.id,
-      externalReference: externalRef,
-      notifToken,
       orderId,
       paymentUrl: providerResult?.payment_url || null,
       amount,
@@ -262,8 +257,7 @@ router.post('/webhook/orange-money', async (req, res) => {
   }
 
   const notifToken = omWebhook.extractNotifToken(body);
-  const externalRef = omWebhook.extractExternalRef(body);
-  if (!notifToken && !externalRef) {
+  if (!notifToken) {
     return res.status(401).json({ error: 'Missing notif_token', code: 'WEBHOOK_AUTH' });
   }
 
@@ -271,11 +265,8 @@ router.post('/webhook/orange-money', async (req, res) => {
   try {
     await client.query('BEGIN');
     const txRes = await client.query(
-      `SELECT * FROM transactions
-       WHERE ($1::text IS NOT NULL AND notif_token = $1)
-          OR ($2::text IS NOT NULL AND external_reference = $2)
-       FOR UPDATE`,
-      [notifToken, externalRef]
+      `SELECT * FROM transactions WHERE notif_token = $1 FOR UPDATE`,
+      [notifToken]
     );
     if (!txRes.rows.length) {
       await client.query('ROLLBACK');
@@ -306,6 +297,12 @@ router.post('/webhook/orange-money', async (req, res) => {
         orderId: tx.external_reference,
         amount: tx.amount,
       });
+      // Production never marks paid when the provider cannot confirm.
+      // Tests / unconfigured sandbox may skip confirmation after notif_token auth.
+      if (isProd && (confirmation.skipped || !confirmation.ok)) {
+        await client.query('ROLLBACK');
+        return res.status(502).json({ error: 'Provider status not confirmed', code: 'PROVIDER_UNCONFIRMED' });
+      }
       if (!confirmation.skipped && !confirmation.ok) {
         await client.query('ROLLBACK');
         return res.status(502).json({ error: 'Provider status not confirmed', code: 'PROVIDER_UNCONFIRMED' });
@@ -371,7 +368,7 @@ router.get('/status/:transactionId', authenticate, async (req, res) => {
   const db = req.app.locals.db;
   try {
     const result = await db.query(
-      `SELECT id, order_id, user_id, amount, status, method, external_reference, notif_token, created_at, updated_at
+      `SELECT id, order_id, user_id, amount, status, method, created_at, updated_at
        FROM transactions WHERE id = $1`,
       [req.params.transactionId]
     );

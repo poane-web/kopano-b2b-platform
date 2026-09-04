@@ -5,7 +5,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { createApp } = require('./app');
-const { getDb, wrapPglite } = require('./models/db');
+const { getDb, wrapPglite, runSql } = require('./models/db');
 
 const isProd = process.env.NODE_ENV === 'production';
 if (isProd) {
@@ -48,10 +48,16 @@ async function applyMigrations(db) {
   for (const f of files) {
     const sql = fs.readFileSync(path.join(dir, f), 'utf8');
     try {
-      await db.query(sql);
+      await runSql(db, sql);
       console.log('Applied migration', f);
     } catch (e) {
-      console.warn('migration', f, e.message);
+      const msg = e && e.message ? e.message : String(e);
+      if (/already exists|duplicate/i.test(msg)) {
+        console.warn('migration', f, 'already applied');
+        continue;
+      }
+      console.error('migration', f, msg);
+      if (isProd) throw e;
     }
   }
 }
@@ -71,7 +77,7 @@ async function start() {
   try {
     await applyMigrations(db);
   } catch (err) {
-    console.warn('migrations:', err.message);
+    console.error('migrations:', err.message);
     if (isProd) process.exit(1);
   }
   const app = createApp({ db });
@@ -98,4 +104,4 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 if (require.main === module) start();
 
-module.exports = { start };
+module.exports = { start, applyMigrations };

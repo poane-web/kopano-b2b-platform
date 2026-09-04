@@ -12,6 +12,7 @@ const {
   seedGroup,
   tokenFor,
   signWebhook,
+  hydratePay,
 } = require('./helpers');
 
 describe('authorization, isolation, payments, concurrency', async () => {
@@ -136,6 +137,7 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tok,
       body: { orderId: crypto.randomUUID() },
     });
+    await hydratePay(db, pay);
     assert.ok([403, 404].includes(pay.status));
   });
 
@@ -153,6 +155,39 @@ describe('authorization, isolation, payments, concurrency', async () => {
     assert.ok(Array.isArray(shops.json));
     const asCustomer = await request(base, 'GET', '/api/agents/shops', { token: tokenFor(customerA) });
     assert.equal(asCustomer.status, 403);
+  });
+
+  it('agent A cannot see shops activated by agent B', async () => {
+    const agentBUser = await seedUser(db, {
+      phone: '+26771110019',
+      pin: '1234',
+      businessName: 'Agent Two',
+      role: 'agent',
+    });
+    const agB = await db.query(`INSERT INTO agents (user_id, region, active) VALUES ($1,'Maun',true) RETURNING *`, [
+      agentBUser.id,
+    ]);
+    const created = await request(base, 'POST', '/api/agents/activation', {
+      token: tokenFor(agentBUser, { agentId: agB.rows[0].id }),
+      body: {
+        businessName: 'B Shop',
+        phone: '+26771118888',
+        pin: '1234',
+        category: 'retail',
+        location: 'Maun',
+      },
+    });
+    assert.equal(created.status, 201, created.json && created.json.error);
+    const shopsA = await request(base, 'GET', '/api/agents/shops', {
+      token: tokenFor(agentUser, { agentId: agent.id }),
+    });
+    const shopsB = await request(base, 'GET', '/api/agents/shops', {
+      token: tokenFor(agentBUser, { agentId: agB.rows[0].id }),
+    });
+    assert.equal(shopsA.status, 200);
+    assert.equal(shopsB.status, 200);
+    assert.ok(shopsB.json.some((s) => s.business_name === 'B Shop'));
+    assert.ok(!shopsA.json.some((s) => s.business_name === 'B Shop'));
   });
 
   it('concurrent last-unit orders: exactly one succeeds', async () => {
@@ -214,11 +249,13 @@ describe('authorization, isolation, payments, concurrency', async () => {
       body: { orderId: order.json.id, amount: 1 },
       headers: { 'X-Idempotency-Key': key },
     });
+    await hydratePay(db, p1);
     const p2 = await request(base, 'POST', '/api/payments/orange-money', {
       token: tokenFor(customerA),
       body: { orderId: order.json.id, amount: 1 },
       headers: { 'X-Idempotency-Key': key },
     });
+    await hydratePay(db, p2);
     assert.equal(p1.status, 200);
     assert.equal(p2.status, 200);
     assert.equal(p1.json.transactionId, p2.json.transactionId);
@@ -238,6 +275,7 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id, amount: 1 },
     });
+    await hydratePay(db, pay);
     assert.equal(pay.status, 200);
     assert.notEqual(pay.json.status, 'paid');
     const o = await db.query(`SELECT status, total_amount FROM orders WHERE id = $1`, [order.json.id]);
@@ -255,6 +293,7 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'SUCCESS',
       notif_token: pay.json.notifToken || pay.json.externalReference,
@@ -294,6 +333,7 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerB),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'SUCCESS',
       notif_token: pay.json.notifToken || pay.json.externalReference,
@@ -321,6 +361,7 @@ describe('authorization, isolation, payments, concurrency', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'SUCCESS',
       notif_token: pay.json.notifToken || pay.json.externalReference,

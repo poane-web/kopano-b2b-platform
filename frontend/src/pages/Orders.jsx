@@ -28,7 +28,7 @@ export default function Orders() {
       )}
       <div className="space-y-3">
         {(orders || []).map((order) => (
-          <div key={order.id} className="card">
+          <Link key={order.id} to={`/orders/${order.id}`} className="card block">
             <div className="flex justify-between text-xs text-muted mb-2">
               <span className="font-mono">{order.order_number}</span>
               <span>{formatDate(order.created_at)}</span>
@@ -50,7 +50,7 @@ export default function Orders() {
                 <div className="text-xs text-muted mt-1">{order.pickup_location}</div>
               </div>
             )}
-          </div>
+          </Link>
         ))}
       </div>
     </div>

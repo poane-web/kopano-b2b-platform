@@ -1,143 +1,254 @@
-# Kopano launch report
+# Kopano launch report (V2 verification)
 
-**Date:** 2026-09-01  
-**Classification:** READY FOR CONTROLLED PILOT  
-**Not:** READY FOR PRODUCTION (live money)
+**Date:** 2026-09-04  
+**Classification:** CONTROLLED PILOT  
+**Not:** PRODUCTION READY / live money
 
-## 1. Phases completed
+Verified against commit `b57a40e` plus the V2 hardening changes in this report.
 
-| Phase | Status |
-|-------|--------|
-| 1 Architecture, DB, wiring | Complete |
-| 2 Auth, RBAC, API security | Complete |
-| 3 Groups, orders, concurrency, fees | Complete |
-| 4 Payments, idempotency, webhooks | Complete (provider activation external) |
-| 5 Supplier / agent / CSV / referrals | Complete |
-| 6 Frontend/API alignment, token lifecycle, payment UX | Complete |
-| 7 PWA stale financial cache | Complete (API network-only) |
-| 8 Production Docker / env | Complete (compose files; Docker engine not in this sandbox) |
-| 9 Integration tests | Complete on PGlite — 57 passed; real PostgreSQL suite present, skipped here |
-| 10 Security review | Complete |
-| 11 Reservation / payment lifecycle (P1) | Complete |
-| 12 Role-aware UI/UX overhaul | Complete |
+## 1. Executive summary
 
-## 2. Important files
+The role-aware B2B UI (clients, wholesalers, agents, admin) is wired to existing backend APIs. V2 inspection found and fixed:
 
-- `backend/src/services/reservations.js` — reserved / confirmed / released capacity
-- `backend/src/routes/{orders,payments,groups,supplier,agents,admin}.js`
-- `backend/src/lib/omWebhook.js` — raw-body parse + optional HMAC; notif_token auth
-- `backend/src/schema.sql`, `backend/src/migrations/002_reservations.sql`
-- `frontend/src/App.jsx`, `frontend/src/components/AppShell.jsx`, `frontend/src/components/RequireAuth.jsx`
-- `frontend/src/api/client.js`
-- `docker-compose.yml`, `docker-compose.prod.yml`, `docker-compose.dev.yml`
+- `notif_token` / `external_reference` leaked to the payment client (webhook forgeable from the browser).
+- PGlite (and any prepared-statement path) could not apply multi-statement migrations (`001`/`002`).
+- Money math used float multiplication; totals now go through integer thebe helpers.
+- Dead/fake analytics surface (`Analytics.jsx`) and unused layout shells removed.
+- Production SUCCESS webhooks cannot mark paid when Orange Money confirmation is skipped.
+- Order detail can resume Orange Money payment or cancel an unpaid reservation.
 
-## 3. Vulnerabilities / logic bugs (before → after)
+Real PostgreSQL concurrency, Docker runtime, and live Orange Money credentials remain **unproven in this environment**. That is why this is still a controlled pilot, not a production-money launch.
 
-| Issue | Before | After |
-|-------|--------|--------|
-| Unpaid order permanently consumed group quantity | `current_quantity` incremented at checkout; fail left it filled | `reserved_quantity` held until pay/fail/expire/cancel; fail/expire/cancel releases |
-| Webhook HMAC over `JSON.stringify(req.body)` | Could diverge from wire bytes | Raw request bytes captured; HMAC only if header/`OM_REQUIRE_HMAC` |
-| Orange callback auth guessed as HMAC | Incorrect vs WebPay spec | `notif_token` lookup + Transaction Status API when credentials exist |
-| Tracked `.env.txt` | Placeholder secrets in git | Removed from git; ignored |
-| Dashboard only exposed Groups/Orders/Rewards/Profile | Other roles and B2B ops were hidden | Role-aware shell + wholesaler/agent/admin workspaces |
+## 2. Architecture
 
-## 4. Tests (exact, this environment)
+- **Frontend:** Vite + React 18 + Tailwind, role-aware `AppShell`, JWT in `localStorage`, `/api` proxy.
+- **Backend:** Express 5, JWT access + refresh, RBAC (`customer|agent|supplier|admin`).
+- **Data:** PostgreSQL 15 in production compose; in-memory PGlite when `DATABASE_URL` is unset (dev/tests only).
+- **Capacity:** `reserved_quantity` / `confirmed_quantity` / `released`, `FOR UPDATE` lock order group→order.
+- **Payments:** Orange Money WebPay. Client never receives `notif_token`. Production requires Transaction Status API confirmation.
+
+## 3. Backend capability matrix
+
+| Capability | Endpoint | Auth | Role / ownership | Frontend | Status |
+|---|---|---|---|---|---|
+| Register | POST `/api/auth/register` | no | public | Auth | PASS |
+| Login | POST `/api/auth/login` | no | public | Auth | PASS |
+| Refresh | POST `/api/auth/refresh` | refresh JWT | — | client.js | PARTIAL (no rotation/store) |
+| Me | GET `/api/auth/me` | JWT | self | AppShell | PASS |
+| Supplier login | POST `/api/auth/supplier-login` | no | supplier | SupplierLogin | PASS |
+| Groups list/detail | GET `/api/groups`, `/api/groups/:id` | no | catalogue | Buy, GroupDetail | PASS (public browse) |
+| Create order | POST `/api/orders` | JWT | customer | Checkout | PASS |
+| My orders / detail | GET `/api/orders/my`, `/api/orders/:id` | JWT | owner or admin | Orders, OrderDetail | PASS |
+| Cancel | POST `/api/orders/:id/cancel` | JWT | owner | OrderDetail | PASS |
+| Pay OM | POST `/api/payments/orange-money` | JWT | order owner | Checkout, OrderDetail | PASS |
+| OM webhook | POST `/api/payments/webhook/orange-money` | notif_token | provider | — | PASS |
+| Pay status | GET `/api/payments/status/:id` | JWT | owner/admin | Success | PASS |
+| Expire stale | POST `/api/payments/expire-stale` | JWT | admin | none | PASS (ops) |
+| Referrals | `/api/referrals/*` | mixed | owner / admin | Rewards | PASS |
+| Supplier app | `/api/supplier-app/*` | JWT | supplier + `supplier_id` | Wholesaler workspace | PASS |
+| Agents | `/api/agents/*` | JWT | agent (+ admin) | Agent workspace | PASS |
+| Admin | `/api/admin/*` | JWT | admin | Admin workspace | PARTIAL (no orders UI) |
+| Logout / password reset | — | — | — | — | NOT IMPLEMENTED |
+
+## 4. Frontend capability matrix
+
+| Role | Home | Screens |
+|---|---|---|
+| customer | `/app` | Home, Buy, Group, Checkout, Orders, Order detail (pay/cancel), Rewards, Profile |
+| supplier (Wholesaler) | `/wholesaler` | Overview, Groups, Orders, Order detail, Catalogue, Deliveries, Analytics (real fill counts), Profile |
+| agent | `/agent` | Home, Shops, Activate, Assist, Profile |
+| admin | `/admin` | Overview, Clients, Groups, Revenue, Profile |
+
+Route guards: `RequireAuth` + role wrappers. Backend remains the authority.
+
+## 5. Security findings
+
+### P0 — webhook token leak (fixed)
+
+- **Finding:** Initiate/status responses returned `notifToken` and `externalReference`.
+- **Evidence:** `POST /api/payments/orange-money` JSON; webhook lookup previously accepted `external_reference`.
+- **Impact:** A customer could forge SUCCESS for their own order without the provider.
+- **Fix:** Unguessable `notif_token`; never returned to clients; webhook lookup is `notif_token` only; production rejects skipped confirmation.
+- **Test:** `does not leak notif_token…`; `production never marks paid when provider confirmation is skipped`.
+- **Status:** Fixed.
+
+### P0 — unpaid capacity consumed forever (fixed earlier)
+
+- **Finding:** `current_quantity` incremented at checkout; failed payment did not release.
+- **Fix:** reserved / confirmed / released with row locks.
+- **Status:** Fixed (PGlite). Real Postgres concurrency still unproven here.
+
+### P1 — multi-statement migrations failed on PGlite (fixed)
+
+- **Finding:** `db.query(entireFile)` → `cannot insert multiple commands into a prepared statement`.
+- **Fix:** `runSql` / `exec` + statement split; production fails hard on real migration errors.
+- **Test:** `applies 001–003 on PGlite after schema.sql`.
+- **Status:** Fixed.
+
+### P1 — money float drift (fixed)
+
+- **Finding:** `unitPrice * quantity` and fee bps in IEEE floats.
+- **Fix:** integer thebe helpers (`mulQty`, `feeBps`, `addMoney`).
+- **Status:** Fixed.
+
+### HIGH — refresh tokens (open)
+
+- No server-side store, rotation, or revocation. Stolen refresh JWT works until expiry (default 7d).
+- **Status:** Known limitation. Acceptable for controlled pilot; not for production money.
+
+### MEDIUM — JWT role snapshot
+
+- Role is signed into the access token (1h). Demotion waits for expiry.
+- **Status:** Documented.
+
+### MEDIUM — public group catalogue
+
+- `GET /api/groups` is unauthenticated by design (browse before login).
+- **Status:** Intentional.
+
+## 6. Authorization / isolation results
+
+| Check | Result |
+|---|---|
+| Client A → Client B order | 404 |
+| Customer → admin / supplier / agent | 403 |
+| Wholesaler A → Wholesaler B orders/groups | 404 / empty scoped list |
+| Agent A → Agent B shops | not listed |
+| Agent → supplier analytics | 403 |
+| Unauthenticated admin | 401 |
+| Admin stats | 200 |
+
+IDOR tests cover URL ids for orders (customer and supplier). Query/body supplier ids are ignored; ownership comes from JWT `supplierId` / `userId`.
+
+## 7. Payment / financial integrity
+
+| Gate | Result |
+|---|---|
+| State machine | pending_payment → payment_initiated → paid; fail/expire/cancel → released |
+| Client cannot set paid | amount in body ignored; status not client-writable |
+| Webhook auth | `notif_token` required; unknown token 401 |
+| HMAC | optional; over raw bytes when present |
+| Amount mismatch | 400 `AMOUNT_MISMATCH` |
+| Duplicate webhook | 200 `already_completed`; quantities once |
+| Production skip | 502 `PROVIDER_UNCONFIRMED`; order stays unpaid |
+| Sandbox auto-complete | only when `PAYMENT_SANDBOX_AUTO_COMPLETE=true` **and** `NODE_ENV !== production` |
+
+**CODE READY. PROVIDER ACTIVATION REQUIRED.**
+
+## 8. PostgreSQL concurrency
+
+Mandatory gate: **not proven in this sandbox.**
+
+- `TEST_DATABASE_URL` unset.
+- `apt-get install postgresql` → packages not in the image.
+- `docker` → command not found.
+
+PGlite tests serialize `getClient()`, so “exactly one succeeds” on last-unit is **not** a PostgreSQL `FOR UPDATE` proof.
+
+The suite `postgresql reservation lifecycle` is present and skipped. Run on a host with Postgres:
+
+```bash
+cd backend
+TEST_DATABASE_URL=postgres://kopano:change-me@127.0.0.1:5432/kopano npm run test:pg
+```
+
+## 9. UI/UX
+
+- Kopano identity: forest teal, sand/clay, Plus Jakarta Sans, BWP formatting.
+- Mobile bottom nav + desktop sidebar.
+- Empty / loading / error states on role workspaces.
+- Fake charts removed. Wholesaler analytics = live group fill counts.
+- Order detail can resume payment or cancel unpaid orders.
+
+## 10. Docker
+
+Compose files inspected, **not executed** (`docker: command not found`).
+
+Production overlay (`docker-compose.yml` + `docker-compose.prod.yml`):
+
+- Postgres not published
+- Frontend bind-mounts reset; nginx image built
+- `JWT_SECRET`, `JWT_REFRESH_SECRET`, `DB_PASSWORD` required via `:?`
+- `PAYMENT_SANDBOX_AUTO_COMPLETE=false`
+
+## 11. Dependency audit
+
+This run: `npm audit --omit=dev` **timed out** (registry unreachable).
+
+Last successful local result (previous pass, still the same lockfiles):
+
+- Backend: 0 vulnerabilities
+- Frontend: 2 moderate (react-router 6 SSR / open-redirect). Kopano is a SPA, not an SSR host; not force-upgraded to v7.
+
+## 12. Test results (exact, this environment)
 
 ```
 cd backend && npm test
-# tests 57
-# suites 7
-# pass 57
+# tests 66
+# suites 9
+# pass 66
 # fail 0
 # skipped 0
 ```
 
-`postgresql reservation lifecycle` suite is **skipped** when `TEST_DATABASE_URL` is unset (this sandbox: no Docker, no system Postgres). Node's summary counts that skipped suite as zero tests, not a skipped case.
+Node does not count the skipped PostgreSQL *suite* as a skipped test.
 
-New isolation tests:
-
-- supplier groups/deliveries scoped to authenticated supplier
-- agent shops list is agent-only (customer → 403)
-
-## 5. Reservation regression tests (PGlite)
+Frontend: `vite build` succeeded — **126 modules**.
 
 | Scenario | Result |
-|----------|--------|
-| Successful payment preserves reservation and confirms | reserved→0, confirmed+=qty, current unchanged |
-| Failed payment releases | reserved 0, current restored, group re-opens |
-| Expired reservation releases | admin `/expire-stale` |
-| Cancelled order releases | `POST /api/orders/:id/cancel` |
-| Two customers, last units | 1 × 201, 1 × 409/400, no oversell |
-| Failed hold then another buyer | second 201 |
-| Duplicate SUCCESS webhook | paid then already_completed; quantities once |
-| Repeated payment attempts | same transaction, reserved qty once |
-| Group status available/reserved/confirmed | matches counters |
+|---|---|
+| Order concurrency (PGlite serialized) | pass |
+| Duplicate payment initiate | pass |
+| Duplicate webhook | pass |
+| Forged webhook | pass |
+| Amount tampering | pass |
+| Admin authorization | pass |
+| Supplier isolation | pass |
+| Agent isolation | pass |
+| notif_token not leaked | pass |
+| Production skipped confirmation | pass |
+| Real PostgreSQL FOR UPDATE | **not run** |
 
-## 6. Build / Docker / audit
+## 13. Remaining gaps
 
-- Backend tests: 57 pass
-- Frontend production build: `vite build` succeeded (125 modules)
-- Backend `npm audit --omit=dev`: 0 vulnerabilities
-- Frontend `npm audit --omit=dev`: 2 moderate (react-router 6 SSR/open-redirect). Not force-upgraded to v7 (breaking).
-- Docker: engine **not available** in this sandbox (`docker: command not found`). Compose files were inspected, not executed.
-
-Production overlay (source review, not runtime):
-
-- Postgres not published
-- frontend bind-mounts reset
-- `JWT_SECRET`, `JWT_REFRESH_SECRET`, `DB_PASSWORD` required via `:?`
-- `PAYMENT_SANDBOX_AUTO_COMPLETE=false`
-
-## 7. UI / role architecture (this pass)
-
-Role-aware `AppShell` (mobile bottom nav + desktop sidebar):
-
-| Role | Home | Navigation |
-|------|------|------------|
-| customer | `/app` | Home, Buy, Orders, Rewards, Profile |
-| supplier (labelled Wholesaler) | `/wholesaler` | Overview, Groups, Orders, Catalogue, Deliveries, Analytics, Profile |
-| agent | `/agent` | Home, Shops, Activate, Assist, Profile |
-| admin | `/admin` | Overview, Clients, Groups, Revenue, Profile |
-
-Route guards: `RequireAuth` + role wrappers. Backend remains the authority (`requireAdmin` / `requireSupplier` / `requireAgent`).
-
-New backend reads (ownership-scoped, no frontend-supplied supplier id):
-
-- `GET /api/supplier-app/groups`
-- `GET /api/supplier-app/deliveries`
-- `GET /api/agents/shops`
-
-Live API journey against the running PGlite server:
-
-- register/login shop → 201/200
-- list 3 seeded groups → 200
-- create order (qty 2, reserved) → 201 `pending_payment`
-- customer → admin/supplier/agent APIs → 403
-- bad PIN / bad wholesaler login → 401
-- cancel order → reservation `released`
-- Vite preview on :8080 and `/api` proxy → 200
-
-## 8. Remaining external requirements
+**BLOCKER (live money)**
 
 - Orange Money merchant + OAuth + public HTTPS `notif_url`
-- DPO token if cards are required
-- DNS, TLS, SMS, object storage
-- Hosting + production secrets (`JWT_SECRET`, `DB_PASSWORD`, provider keys)
-- Real PostgreSQL verification via `TEST_DATABASE_URL`
-- Docker engine on the deploy host (`docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d`)
-- Promote an admin: `UPDATE users SET role = 'admin' WHERE phone = '+2677xxxxxxx';`
-- Wholesaler passwords are not in `init.sql` (create via supplier login seed / ops)
+- Real PostgreSQL concurrency proof via `TEST_DATABASE_URL`
+- Production Docker runtime on the deploy host
+- Production secrets (`JWT_SECRET`, `JWT_REFRESH_SECRET`, `DB_PASSWORD`, OM keys)
 
-## 9. Known limitations
+**HIGH**
 
-- No live Orange Money confirmation without merchant credentials. Production cannot mark paid from a simulated success path.
-- Agent field-commission product is not a separate backend; agent home shows referral ledger + honest note.
-- Mascom wallet / card are labelled, not connected.
-- PGlite `FOR UPDATE` is not PostgreSQL. Concurrency tests serialize transactions.
-- Unused legacy files remain (`Analytics.jsx` fake charts, `BottomNav.jsx`) and are not routed.
+- Refresh-token rotation / revocation
+- Docker engine verification in CI
 
-## 10. Launch classification
+**MEDIUM**
 
-**READY FOR CONTROLLED PILOT**
+- Admin orders / wholesaler directory screens (backend list exists for users/groups/revenue only)
+- Agent “commission product” is referral ledger, not a separate payout engine
+- Mascom / DPO labelled, not connected
+- `users.supplier_id` has no FK (indexed only)
 
-Not ready for live money until Orange Money (and optional DPO) credentials are issued, HTTPS `notif_url` is live, and production Docker + Postgres are verified on the deploy host.
+**LOW**
+
+- No logout endpoint (client drops tokens)
+- No password/PIN reset
+
+## 14. Production readiness
+
+**CONTROLLED PILOT**
+
+Not production-ready for live money until provider credentials, HTTPS webhook, PostgreSQL concurrency, and production Docker are verified on the deploy host.
+
+## 15. Commit
+
+See git log after this report is committed. Files in this V2 pass:
+
+- `backend/src/routes/payments.js` — hide tokens; notif_token-only webhook; production skip guard
+- `backend/src/services/payments.js` — unconfigured initiate does not echo externalRef as notif_token
+- `backend/src/lib/money.js`, `backend/src/routes/orders.js` — thebe arithmetic
+- `backend/src/models/db.js`, `backend/src/index.js` — multi-statement migrations
+- `backend/src/schema.sql`, `backend/src/migrations/003_integrity.sql`
+- tests: isolation, webhook leak, production skip, money, migrations
+- frontend: OrderDetail pay/cancel; dead Analytics/Layout/BottomNav/ProgressBar/SupplierLayout removed

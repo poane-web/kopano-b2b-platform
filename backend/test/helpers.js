@@ -162,6 +162,18 @@ function tokenFor(user, extra = {}) {
   });
 }
 
+async function hydratePay(db, pay) {
+  if (!pay?.json?.transactionId) return pay;
+  const r = await db.query(`SELECT notif_token, external_reference FROM transactions WHERE id = $1`, [
+    pay.json.transactionId,
+  ]);
+  if (r.rows[0]) {
+    pay.json.notifToken = r.rows[0].notif_token;
+    pay.json.externalReference = r.rows[0].external_reference;
+  }
+  return pay;
+}
+
 function signWebhook(body, secret = process.env.OM_WEBHOOK_SECRET) {
   const raw = Buffer.isBuffer(body)
     ? body
@@ -178,5 +190,6 @@ module.exports = {
   seedSupplier,
   seedGroup,
   tokenFor,
+  hydratePay,
   signWebhook,
 };

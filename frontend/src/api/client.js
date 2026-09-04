@@ -75,6 +75,7 @@ export const api = {
   orders: {
     create: (data) => request('/orders', { method: 'POST', body: JSON.stringify(data) }),
     my: () => request('/orders/my'),
+    get: (id) => request(`/orders/${id}`),
     cancel: (id) => request(`/orders/${id}/cancel`, { method: 'POST' }),
   },
   payments: {

@@ -11,6 +11,7 @@ const {
   seedGroup,
   tokenFor,
   signWebhook,
+  hydratePay,
 } = require('./helpers');
 
 const HAVE_PG = Boolean(process.env.TEST_DATABASE_URL);
@@ -67,6 +68,7 @@ describe('postgresql reservation lifecycle', { skip: HAVE_PG ? false : 'TEST_DAT
       token: tokenFor(customerA),
       body: { orderId: orderA.json.id },
     });
+    await hydratePay(db, pay);
     const failBody = {
       status: 'FAILED',
       notif_token: pay.json.notifToken,

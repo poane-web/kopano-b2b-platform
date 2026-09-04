@@ -4,7 +4,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
-const { money } = require('../lib/money');
+const { money, mulQty, feeBps, addMoney } = require('../lib/money');
 const reservations = require('../services/reservations');
 
 const MAX_QTY_PER_ORDER = parseInt(process.env.MAX_ORDER_QTY || '100', 10);
@@ -58,10 +58,10 @@ router.post('/', authenticate, async (req, res) => {
     }
 
     const unitPrice = money(g.unit_price);
-    const subtotal = money(unitPrice * quantity);
-    const platformFee = money((subtotal * PLATFORM_FEE_BPS) / 10000);
+    const subtotal = mulQty(unitPrice, quantity);
+    const platformFee = feeBps(subtotal, PLATFORM_FEE_BPS);
     const deliveryFee = money(g.delivery_fee || 15);
-    const grandTotal = money(subtotal + platformFee + deliveryFee);
+    const grandTotal = addMoney(subtotal, platformFee, deliveryFee);
     const orderNum = 'KPN-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 
     const orderRes = await client.query(

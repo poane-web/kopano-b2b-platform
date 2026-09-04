@@ -10,6 +10,7 @@ import Buy from './pages/Buy';
 import GroupDetail from './pages/GroupDetail';
 import Checkout from './pages/Checkout';
 import Orders from './pages/Orders';
+import OrderDetail from './pages/OrderDetail';
 import Profile from './pages/Profile';
 import Referrals from './pages/Referrals';
 import Success from './pages/Success';
@@ -98,6 +99,7 @@ export default function App() {
           <Route path="/groups/:id" element={<Customer><GroupDetail /></Customer>} />
           <Route path="/checkout" element={<Customer><Checkout /></Customer>} />
           <Route path="/orders" element={<Customer><Orders /></Customer>} />
+          <Route path="/orders/:id" element={<Customer><OrderDetail /></Customer>} />
           <Route
             path="/rewards"
             element={

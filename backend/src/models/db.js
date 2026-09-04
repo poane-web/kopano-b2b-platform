@@ -2,6 +2,35 @@
 
 const { Pool } = require('pg');
 
+function splitSqlStatements(sql) {
+  return String(sql || '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => {
+      const body = s
+        .split('\n')
+        .map((line) => {
+          const i = line.indexOf('--');
+          return (i === -1 ? line : line.slice(0, i)).trim();
+        })
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+      return body.length > 0;
+    });
+}
+
+async function runSql(db, sql) {
+  if (!sql || !String(sql).trim()) return;
+  if (typeof db.exec === 'function') {
+    await db.exec(sql);
+    return;
+  }
+  for (const stmt of splitSqlStatements(sql)) {
+    await db.query(stmt);
+  }
+}
+
 function createPgPool() {
   const connectionString =
     process.env.DATABASE_URL ||
@@ -32,6 +61,7 @@ function createPgPool() {
   return {
     pool,
     query: (text, params) => pool.query(text, params),
+    exec: (text) => pool.query(text),
     getClient: () => pool.connect(),
     healthCheck: async () => {
       const result = await pool.query('SELECT 1 AS ok');
@@ -43,6 +73,7 @@ function createPgPool() {
 /**
  * Wrap a PGlite instance with a pg-like interface.
  * Serializes getClient() so tests can exercise reservation logic safely.
+ * PGlite query() cannot run multi-statement SQL; use exec() for migrations.
  */
 function wrapPglite(pglite) {
   let chain = Promise.resolve();
@@ -69,6 +100,7 @@ function wrapPglite(pglite) {
       },
     },
     query: (text, params) => pglite.query(text, params),
+    exec: (text) => pglite.exec(text),
     getClient,
     healthCheck: async () => {
       const result = await pglite.query('SELECT 1 AS ok');
@@ -85,4 +117,4 @@ function getDb() {
   return singleton;
 }
 
-module.exports = { getDb, createPgPool, wrapPglite };
+module.exports = { getDb, createPgPool, wrapPglite, splitSqlStatements, runSql };

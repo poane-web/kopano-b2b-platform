@@ -12,6 +12,7 @@ const {
   seedGroup,
   tokenFor,
   signWebhook,
+  hydratePay,
 } = require('./helpers');
 
 async function capacity(db, groupId) {
@@ -64,6 +65,7 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     assert.equal(pay.status, 200);
     const body = {
       status: 'SUCCESS',
@@ -98,6 +100,7 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'FAILED',
       notif_token: pay.json.notifToken || pay.json.externalReference,
@@ -197,6 +200,7 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: orderA.json.id },
     });
+    await hydratePay(db, pay);
     const failBody = {
       status: 'FAILED',
       notif_token: pay.json.notifToken || pay.json.externalReference,
@@ -230,6 +234,7 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'SUCCESS',
       notif_token: pay.json.notifToken || pay.json.externalReference,
@@ -263,10 +268,12 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, p1);
     const p2 = await request(base, 'POST', '/api/payments/orange-money', {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, p2);
     assert.equal(p1.status, 200);
     assert.equal(p2.status, 200);
     assert.equal(p1.json.transactionId, p2.json.transactionId);
@@ -292,6 +299,7 @@ describe('reservation / payment lifecycle', async () => {
       token: tokenFor(customerA),
       body: { orderId: order.json.id },
     });
+    await hydratePay(db, pay);
     const body = {
       status: 'SUCCESS',
       notif_token: pay.json.notifToken || pay.json.externalReference,
